@@ -10,10 +10,11 @@ import {
   GetDeviceConnectParams,
 } from "@workspace/api-zod";
 import { randomBytes } from "crypto";
+import { broadcast } from "../lib/ws-server";
 
 const router = Router();
 
-// Never expose the internal token in list/get responses
+/** Strip the internal token from device rows returned to the dashboard */
 function safeDevice(d: typeof devicesTable.$inferSelect) {
   return {
     id: d.id,
@@ -23,18 +24,16 @@ function safeDevice(d: typeof devicesTable.$inferSelect) {
     batteryLevel: d.batteryLevel ?? null,
     signalStrength: d.signalStrength ?? null,
     lastSeen: d.lastSeen?.toISOString() ?? null,
-    token: "[hidden]", // token is only exposed via the /connect endpoint
+    token: "[hidden]",
     createdAt: d.createdAt.toISOString(),
   };
 }
 
-// List devices
-router.get("/devices", async (req, res) => {
+router.get("/devices", async (_req, res) => {
   const devices = await db.select().from(devicesTable).orderBy(devicesTable.createdAt);
   res.json(devices.map(safeDevice));
 });
 
-// Create device
 router.post("/devices", async (req, res) => {
   const body = CreateDeviceBody.parse(req.body);
   const token = randomBytes(24).toString("hex");
@@ -42,53 +41,65 @@ router.post("/devices", async (req, res) => {
     .insert(devicesTable)
     .values({ name: body.name, phoneNumber: body.phoneNumber, token, status: "offline" })
     .returning();
+
   await db.insert(activityLogTable).values({
     type: "device_connected",
     description: `Device "${body.name}" registered`,
     relatedId: device.id,
   });
-  // Return the real token on creation so the user can set up the device immediately
+
+  broadcast("device:registered", { deviceId: device.id, name: body.name });
+
+  // Return real token on creation so dashboard can show the QR immediately
   res.status(201).json({ ...safeDevice(device), token: device.token });
 });
 
-// Get device
 router.get("/devices/:id", async (req, res) => {
   const { id } = GetDeviceParams.parse({ id: Number(req.params.id) });
   const [device] = await db.select().from(devicesTable).where(eq(devicesTable.id, id));
-  if (!device) {
-    res.status(404).json({ error: "Device not found" });
-    return;
-  }
+  if (!device) { res.status(404).json({ error: "Device not found" }); return; }
   res.json(safeDevice(device));
 });
 
-// Delete device
 router.delete("/devices/:id", async (req, res) => {
   const { id } = DeleteDeviceParams.parse({ id: Number(req.params.id) });
+  const [device] = await db.select().from(devicesTable).where(eq(devicesTable.id, id));
   await db.delete(devicesTable).where(eq(devicesTable.id, id));
+  if (device) {
+    broadcast("device:removed", { deviceId: id, name: device.name });
+  }
   res.status(204).send();
 });
 
-// Heartbeat — requires token validation
+/**
+ * Heartbeat — called by the mobile page every ~25 seconds.
+ * Requires the device token via Authorization header OR ?token= query param.
+ */
 router.patch("/devices/:id/heartbeat", async (req, res) => {
   const { id } = DeviceHeartbeatParams.parse({ id: Number(req.params.id) });
   const body = DeviceHeartbeatBody.parse(req.body);
 
-  // Validate device token from query param or Authorization header
   const providedToken =
     (req.query.token as string | undefined) ??
     req.headers.authorization?.replace(/^Bearer\s+/i, "");
 
-  const [existing] = await db.select({ token: devicesTable.token }).from(devicesTable).where(eq(devicesTable.id, id));
+  const [existing] = await db
+    .select({ token: devicesTable.token, name: devicesTable.name, status: devicesTable.status })
+    .from(devicesTable)
+    .where(eq(devicesTable.id, id));
+
   if (!existing || !providedToken || existing.token !== providedToken) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
 
+  const wasOffline = existing.status === "offline";
+  const newStatus = (body.status as string | null | undefined) ?? "online";
+
   const [device] = await db
     .update(devicesTable)
     .set({
-      status: (body.status as string) ?? "online",
+      status: newStatus,
       batteryLevel: body.batteryLevel ?? undefined,
       signalStrength: body.signalStrength ?? undefined,
       lastSeen: new Date(),
@@ -96,23 +107,45 @@ router.patch("/devices/:id/heartbeat", async (req, res) => {
     .where(eq(devicesTable.id, id))
     .returning();
 
+  if (wasOffline && newStatus === "online") {
+    await db.insert(activityLogTable).values({
+      type: "device_connected",
+      description: `Device "${existing.name}" came back online`,
+      relatedId: id,
+    });
+  }
+
+  broadcast("device:status", {
+    deviceId: id,
+    name: device.name,
+    status: device.status,
+    batteryLevel: device.batteryLevel,
+    signalStrength: device.signalStrength,
+    lastSeen: device.lastSeen?.toISOString(),
+  });
+
   res.json(safeDevice(device));
 });
 
-// Connect info (QR code data) — only endpoint that returns real token
+/**
+ * Returns the mobile-page URL (what the QR code encodes) + the raw token.
+ * This is the only endpoint that exposes the token.
+ */
 router.get("/devices/:id/connect", async (req, res) => {
   const { id } = GetDeviceConnectParams.parse({ id: Number(req.params.id) });
   const [device] = await db.select().from(devicesTable).where(eq(devicesTable.id, id));
-  if (!device) {
-    res.status(404).json({ error: "Device not found" });
-    return;
-  }
+  if (!device) { res.status(404).json({ error: "Device not found" }); return; }
+
+  const proto = (req.headers["x-forwarded-proto"] as string | undefined) ?? "https";
   const host = req.headers.host ?? "localhost";
-  const proto = req.headers["x-forwarded-proto"] ?? "https";
-  // Token is passed in the Authorization header payload, not as a URL query param
-  const connectUrl = `${proto}://${host}/api/devices/${id}/heartbeat`;
-  const qrData = JSON.stringify({ deviceId: id, token: device.token, connectUrl });
-  res.json({ token: device.token, connectUrl, qrData });
+  // QR code encodes the mobile-gateway page URL — what the phone opens
+  const mobileUrl = `${proto}://${host}/mobile?deviceId=${id}&token=${device.token}`;
+
+  res.json({
+    token: device.token,
+    connectUrl: mobileUrl,
+    qrData: mobileUrl,
+  });
 });
 
 export default router;

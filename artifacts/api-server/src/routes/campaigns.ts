@@ -18,6 +18,7 @@ import {
   PauseCampaignParams,
   CancelCampaignParams,
 } from "@workspace/api-zod";
+import { broadcast } from "../lib/ws-server";
 
 const router = Router();
 
@@ -26,12 +27,12 @@ async function enrichCampaign(c: typeof campaignsTable.$inferSelect) {
   let contactListName: string | null = null;
 
   if (c.deviceId) {
-    const [device] = await db.select({ name: devicesTable.name }).from(devicesTable).where(eq(devicesTable.id, c.deviceId));
-    deviceName = device?.name ?? null;
+    const [d] = await db.select({ name: devicesTable.name }).from(devicesTable).where(eq(devicesTable.id, c.deviceId));
+    deviceName = d?.name ?? null;
   }
   if (c.contactListId) {
-    const [list] = await db.select({ name: contactListsTable.name }).from(contactListsTable).where(eq(contactListsTable.id, c.contactListId));
-    contactListName = list?.name ?? null;
+    const [l] = await db.select({ name: contactListsTable.name }).from(contactListsTable).where(eq(contactListsTable.id, c.contactListId));
+    contactListName = l?.name ?? null;
   }
 
   return {
@@ -45,14 +46,12 @@ async function enrichCampaign(c: typeof campaignsTable.$inferSelect) {
   };
 }
 
-// List campaigns
-router.get("/campaigns", async (req, res) => {
+router.get("/campaigns", async (_req, res) => {
   const campaigns = await db.select().from(campaignsTable).orderBy(campaignsTable.createdAt);
   const enriched = await Promise.all(campaigns.map(enrichCampaign));
   res.json(enriched);
 });
 
-// Create campaign
 router.post("/campaigns", async (req, res) => {
   const body = CreateCampaignBody.parse(req.body);
 
@@ -81,38 +80,35 @@ router.post("/campaigns", async (req, res) => {
   res.status(201).json(await enrichCampaign(campaign));
 });
 
-// Get campaign
 router.get("/campaigns/:id", async (req, res) => {
   const { id } = GetCampaignParams.parse({ id: Number(req.params.id) });
   const [campaign] = await db.select().from(campaignsTable).where(eq(campaignsTable.id, id));
-  if (!campaign) {
-    res.status(404).json({ error: "Campaign not found" });
-    return;
-  }
+  if (!campaign) { res.status(404).json({ error: "Campaign not found" }); return; }
   res.json(await enrichCampaign(campaign));
 });
 
-// Delete campaign
 router.delete("/campaigns/:id", async (req, res) => {
   const { id } = DeleteCampaignParams.parse({ id: Number(req.params.id) });
   await db.delete(campaignsTable).where(eq(campaignsTable.id, id));
   res.status(204).send();
 });
 
-// Send campaign
 router.patch("/campaigns/:id/send", async (req, res) => {
   const { id } = SendCampaignParams.parse({ id: Number(req.params.id) });
   const [campaign] = await db.select().from(campaignsTable).where(eq(campaignsTable.id, id));
-  if (!campaign) {
-    res.status(404).json({ error: "Campaign not found" });
-    return;
-  }
+  if (!campaign) { res.status(404).json({ error: "Campaign not found" }); return; }
 
+  // Queue messages for processing by the campaign processor background job
   if (campaign.contactListId) {
     const members = await db
       .select({ contactId: contactListContactsTable.contactId })
       .from(contactListContactsTable)
       .where(eq(contactListContactsTable.listId, campaign.contactListId));
+
+    // Remove any existing queued/failed messages from previous send attempts
+    await db
+      .delete(messagesTable)
+      .where(eq(messagesTable.campaignId, id));
 
     for (const member of members) {
       const [contact] = await db.select().from(contactsTable).where(eq(contactsTable.id, member.contactId));
@@ -123,8 +119,7 @@ router.patch("/campaigns/:id/send", async (req, res) => {
           deviceId: campaign.deviceId,
           phoneNumber: contact.phoneNumber,
           messageText: campaign.message,
-          status: "sent",
-          sentAt: new Date(),
+          status: "queued", // Will be processed by campaign-processor
         });
       }
     }
@@ -135,8 +130,11 @@ router.patch("/campaigns/:id/send", async (req, res) => {
     .set({
       status: "sending",
       startedAt: new Date(),
-      totalCount: campaign.totalCount || 0,
-      sentCount: campaign.totalCount || 0,
+      sentCount: 0,
+      failedCount: 0,
+      totalCount: campaign.contactListId
+        ? (await db.select().from(messagesTable).where(eq(messagesTable.campaignId, id))).length
+        : campaign.totalCount,
     })
     .where(eq(campaignsTable.id, id))
     .returning();
@@ -147,36 +145,48 @@ router.patch("/campaigns/:id/send", async (req, res) => {
     relatedId: id,
   });
 
+  broadcast("campaign:started", {
+    campaignId: id,
+    name: campaign.name,
+    totalCount: updated.totalCount,
+  });
+
   res.json(await enrichCampaign(updated));
 });
 
-// Pause campaign
 router.patch("/campaigns/:id/pause", async (req, res) => {
   const { id } = PauseCampaignParams.parse({ id: Number(req.params.id) });
+  const [campaign] = await db.select().from(campaignsTable).where(eq(campaignsTable.id, id));
+  if (!campaign) { res.status(404).json({ error: "Campaign not found" }); return; }
+
   const [updated] = await db
     .update(campaignsTable)
     .set({ status: "paused" })
     .where(eq(campaignsTable.id, id))
     .returning();
-  if (!updated) {
-    res.status(404).json({ error: "Campaign not found" });
-    return;
-  }
+
+  broadcast("campaign:paused", { campaignId: id, name: campaign.name });
   res.json(await enrichCampaign(updated));
 });
 
-// Cancel campaign
 router.patch("/campaigns/:id/cancel", async (req, res) => {
   const { id } = CancelCampaignParams.parse({ id: Number(req.params.id) });
+  const [campaign] = await db.select().from(campaignsTable).where(eq(campaignsTable.id, id));
+  if (!campaign) { res.status(404).json({ error: "Campaign not found" }); return; }
+
+  // Mark all queued messages as failed
+  await db
+    .update(messagesTable)
+    .set({ status: "failed" })
+    .where(eq(messagesTable.campaignId, id));
+
   const [updated] = await db
     .update(campaignsTable)
-    .set({ status: "cancelled" })
+    .set({ status: "cancelled", completedAt: new Date() })
     .where(eq(campaignsTable.id, id))
     .returning();
-  if (!updated) {
-    res.status(404).json({ error: "Campaign not found" });
-    return;
-  }
+
+  broadcast("campaign:cancelled", { campaignId: id, name: campaign.name });
   res.json(await enrichCampaign(updated));
 });
 
