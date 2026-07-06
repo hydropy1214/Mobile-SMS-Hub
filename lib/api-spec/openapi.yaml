@@ -3,20 +3,32 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Bulk SMS Dashboard API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: devices
+    description: Mobile device management
+  - name: contacts
+    description: Contact management
+  - name: contact-lists
+    description: Contact list management
+  - name: campaigns
+    description: SMS campaign management
+  - name: messages
+    description: Message records
+  - name: dashboard
+    description: Dashboard stats and activity
+
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,6 +36,492 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  # ── Devices ──────────────────────────────────────────────────────────────────
+  /devices:
+    get:
+      operationId: listDevices
+      tags: [devices]
+      summary: List all registered devices
+      responses:
+        "200":
+          description: List of devices
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Device"
+    post:
+      operationId: createDevice
+      tags: [devices]
+      summary: Register a new device
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeviceInput"
+      responses:
+        "201":
+          description: Device registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Device"
+
+  /devices/{id}:
+    get:
+      operationId: getDevice
+      tags: [devices]
+      summary: Get device by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Device
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Device"
+        "404":
+          description: Not found
+    delete:
+      operationId: deleteDevice
+      tags: [devices]
+      summary: Remove a device
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /devices/{id}/heartbeat:
+    patch:
+      operationId: deviceHeartbeat
+      tags: [devices]
+      summary: Update device status (called from mobile)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeviceHeartbeat"
+      responses:
+        "200":
+          description: Updated device
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Device"
+
+  /devices/{id}/connect:
+    get:
+      operationId: getDeviceConnect
+      tags: [devices]
+      summary: Get connection info (QR code data + token)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Connection info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceConnectInfo"
+
+  # ── Contacts ──────────────────────────────────────────────────────────────────
+  /contacts:
+    get:
+      operationId: listContacts
+      tags: [contacts]
+      summary: List contacts
+      parameters:
+        - name: listId
+          in: query
+          required: false
+          schema:
+            type: ["integer", "null"]
+        - name: search
+          in: query
+          required: false
+          schema:
+            type: ["string", "null"]
+      responses:
+        "200":
+          description: List of contacts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Contact"
+    post:
+      operationId: createContact
+      tags: [contacts]
+      summary: Create a contact
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactInput"
+      responses:
+        "201":
+          description: Created contact
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Contact"
+
+  /contacts/{id}:
+    patch:
+      operationId: updateContact
+      tags: [contacts]
+      summary: Update a contact
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactUpdate"
+      responses:
+        "200":
+          description: Updated contact
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Contact"
+    delete:
+      operationId: deleteContact
+      tags: [contacts]
+      summary: Delete a contact
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  # ── Contact Lists ─────────────────────────────────────────────────────────────
+  /contact-lists:
+    get:
+      operationId: listContactLists
+      tags: [contact-lists]
+      summary: List contact lists
+      responses:
+        "200":
+          description: List of contact lists
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ContactList"
+    post:
+      operationId: createContactList
+      tags: [contact-lists]
+      summary: Create a contact list
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactListInput"
+      responses:
+        "201":
+          description: Created contact list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactList"
+
+  /contact-lists/{id}:
+    get:
+      operationId: getContactList
+      tags: [contact-lists]
+      summary: Get contact list with contacts
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Contact list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactListDetail"
+        "404":
+          description: Not found
+    delete:
+      operationId: deleteContactList
+      tags: [contact-lists]
+      summary: Delete a contact list
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /contact-lists/{id}/contacts:
+    post:
+      operationId: addContactToList
+      tags: [contact-lists]
+      summary: Add a contact to a list
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ListContactInput"
+      responses:
+        "201":
+          description: Added
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Contact"
+
+  /contact-lists/{id}/contacts/{contactId}:
+    delete:
+      operationId: removeContactFromList
+      tags: [contact-lists]
+      summary: Remove contact from a list
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: contactId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Removed
+
+  # ── Campaigns ────────────────────────────────────────────────────────────────
+  /campaigns:
+    get:
+      operationId: listCampaigns
+      tags: [campaigns]
+      summary: List campaigns
+      responses:
+        "200":
+          description: List of campaigns
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Campaign"
+    post:
+      operationId: createCampaign
+      tags: [campaigns]
+      summary: Create a campaign
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CampaignInput"
+      responses:
+        "201":
+          description: Created campaign
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Campaign"
+
+  /campaigns/{id}:
+    get:
+      operationId: getCampaign
+      tags: [campaigns]
+      summary: Get campaign with stats
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Campaign
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Campaign"
+        "404":
+          description: Not found
+    delete:
+      operationId: deleteCampaign
+      tags: [campaigns]
+      summary: Delete a campaign
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /campaigns/{id}/send:
+    patch:
+      operationId: sendCampaign
+      tags: [campaigns]
+      summary: Start sending a campaign
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Campaign started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Campaign"
+
+  /campaigns/{id}/pause:
+    patch:
+      operationId: pauseCampaign
+      tags: [campaigns]
+      summary: Pause a running campaign
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Campaign paused
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Campaign"
+
+  /campaigns/{id}/cancel:
+    patch:
+      operationId: cancelCampaign
+      tags: [campaigns]
+      summary: Cancel a campaign
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Campaign cancelled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Campaign"
+
+  # ── Messages ──────────────────────────────────────────────────────────────────
+  /messages:
+    get:
+      operationId: listMessages
+      tags: [messages]
+      summary: List messages (optionally filtered by campaign)
+      parameters:
+        - name: campaignId
+          in: query
+          required: false
+          schema:
+            type: ["integer", "null"]
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: ["string", "null"]
+      responses:
+        "200":
+          description: List of messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Message"
+
+  # ── Dashboard ─────────────────────────────────────────────────────────────────
+  /dashboard/stats:
+    get:
+      operationId: getDashboardStats
+      tags: [dashboard]
+      summary: Overview stats for the dashboard
+      responses:
+        "200":
+          description: Dashboard stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardStats"
+
+  /dashboard/activity:
+    get:
+      operationId: getDashboardActivity
+      tags: [dashboard]
+      summary: Recent activity feed
+      responses:
+        "200":
+          description: Activity items
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ActivityItem"
+
 components:
   schemas:
     HealthStatus:
@@ -31,6 +529,278 @@ components:
       properties:
         status:
           type: string
-      required:
-        - status
+      required: [status]
 
+    # ── Device ────────────────────────────────────────────────────────────────
+    Device:
+      type: object
+      required: [id, name, phoneNumber, status, token, createdAt]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        phoneNumber:
+          type: string
+        status:
+          type: string
+          enum: [online, offline, idle]
+        batteryLevel:
+          type: ["integer", "null"]
+        signalStrength:
+          type: ["integer", "null"]
+        lastSeen:
+          type: ["string", "null"]
+        token:
+          type: string
+        createdAt:
+          type: string
+
+    DeviceInput:
+      type: object
+      required: [name, phoneNumber]
+      properties:
+        name:
+          type: string
+        phoneNumber:
+          type: string
+
+    DeviceHeartbeat:
+      type: object
+      properties:
+        batteryLevel:
+          type: ["integer", "null"]
+        signalStrength:
+          type: ["integer", "null"]
+        status:
+          type: ["string", "null"]
+          enum: [online, offline, idle, null]
+
+    DeviceConnectInfo:
+      type: object
+      required: [token, connectUrl, qrData]
+      properties:
+        token:
+          type: string
+        connectUrl:
+          type: string
+        qrData:
+          type: string
+
+    # ── Contact ───────────────────────────────────────────────────────────────
+    Contact:
+      type: object
+      required: [id, name, phoneNumber, createdAt]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        phoneNumber:
+          type: string
+        tags:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+
+    ContactInput:
+      type: object
+      required: [name, phoneNumber]
+      properties:
+        name:
+          type: string
+        phoneNumber:
+          type: string
+        tags:
+          type: ["string", "null"]
+
+    ContactUpdate:
+      type: object
+      properties:
+        name:
+          type: ["string", "null"]
+        phoneNumber:
+          type: ["string", "null"]
+        tags:
+          type: ["string", "null"]
+
+    # ── ContactList ───────────────────────────────────────────────────────────
+    ContactList:
+      type: object
+      required: [id, name, contactCount, createdAt]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: ["string", "null"]
+        contactCount:
+          type: integer
+        createdAt:
+          type: string
+
+    ContactListDetail:
+      type: object
+      required: [id, name, contactCount, contacts, createdAt]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: ["string", "null"]
+        contactCount:
+          type: integer
+        contacts:
+          type: array
+          items:
+            $ref: "#/components/schemas/Contact"
+        createdAt:
+          type: string
+
+    ContactListInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        description:
+          type: ["string", "null"]
+
+    ListContactInput:
+      type: object
+      required: [contactId]
+      properties:
+        contactId:
+          type: integer
+
+    # ── Campaign ──────────────────────────────────────────────────────────────
+    Campaign:
+      type: object
+      required: [id, name, message, status, totalCount, sentCount, failedCount, createdAt]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        message:
+          type: string
+        status:
+          type: string
+          enum: [draft, sending, paused, completed, cancelled]
+        deviceId:
+          type: ["integer", "null"]
+        deviceName:
+          type: ["string", "null"]
+        contactListId:
+          type: ["integer", "null"]
+        contactListName:
+          type: ["string", "null"]
+        totalCount:
+          type: integer
+        sentCount:
+          type: integer
+        failedCount:
+          type: integer
+        scheduledAt:
+          type: ["string", "null"]
+        startedAt:
+          type: ["string", "null"]
+        completedAt:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+
+    CampaignInput:
+      type: object
+      required: [name, message]
+      properties:
+        name:
+          type: string
+        message:
+          type: string
+        deviceId:
+          type: ["integer", "null"]
+        contactListId:
+          type: ["integer", "null"]
+        scheduledAt:
+          type: ["string", "null"]
+
+    # ── Message ───────────────────────────────────────────────────────────────
+    Message:
+      type: object
+      required: [id, phoneNumber, status, createdAt]
+      properties:
+        id:
+          type: integer
+        campaignId:
+          type: ["integer", "null"]
+        campaignName:
+          type: ["string", "null"]
+        contactId:
+          type: ["integer", "null"]
+        contactName:
+          type: ["string", "null"]
+        deviceId:
+          type: ["integer", "null"]
+        deviceName:
+          type: ["string", "null"]
+        phoneNumber:
+          type: string
+        messageText:
+          type: ["string", "null"]
+        status:
+          type: string
+          enum: [queued, sent, failed, delivered]
+        sentAt:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+
+    # ── Dashboard ─────────────────────────────────────────────────────────────
+    DashboardStats:
+      type: object
+      required: [devicesOnline, devicesTotal, messagesToday, successRateToday, activeCampaigns, totalContacts]
+      properties:
+        devicesOnline:
+          type: integer
+        devicesTotal:
+          type: integer
+        messagesToday:
+          type: integer
+        successRateToday:
+          type: number
+        activeCampaigns:
+          type: integer
+        totalContacts:
+          type: integer
+        messagesSentThisWeek:
+          type: array
+          items:
+            $ref: "#/components/schemas/DailyMessageCount"
+
+    DailyMessageCount:
+      type: object
+      required: [date, count]
+      properties:
+        date:
+          type: string
+        count:
+          type: integer
+
+    ActivityItem:
+      type: object
+      required: [id, type, description, createdAt]
+      properties:
+        id:
+          type: integer
+        type:
+          type: string
+          enum: [device_connected, device_disconnected, campaign_started, campaign_completed, campaign_failed, message_sent, message_failed]
+        description:
+          type: string
+        relatedId:
+          type: ["integer", "null"]
+        createdAt:
+          type: string

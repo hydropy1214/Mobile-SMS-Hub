@@ -1,0 +1,27 @@
+kind = "web"
+previewPath = "/"
+title = "Bulk SMS Dashboard"
+version = "1.0.0"
+id = "artifacts/sms-dashboard"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 21002
+
+[services.development]
+run = "pnpm --filter @workspace/sms-dashboard run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/sms-dashboard", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/sms-dashboard/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "21002"
+BASE_PATH = "/"
