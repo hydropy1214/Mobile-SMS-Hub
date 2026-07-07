@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { useParams, useLocation } from "wouter";
 import { 
   useGetCampaign, 
@@ -9,6 +9,7 @@ import {
   useCancelCampaign
 } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
+import { useWebSocket } from "@/hooks/use-websocket";
 import { 
   Card, 
   CardContent,
@@ -73,6 +74,28 @@ export default function CampaignDetail() {
   const sendCampaign = useSendCampaign();
   const pauseCampaign = usePauseCampaign();
   const cancelCampaign = useCancelCampaign();
+
+  // Real-time updates: invalidate queries whenever the campaign processor
+  // broadcasts progress or completion events for this campaign.
+  const handleProgress = useCallback((data: unknown) => {
+    const ev = data as { campaignId?: number };
+    if (ev.campaignId === id) {
+      void queryClient.invalidateQueries({ queryKey: getGetCampaignQueryKey(id) });
+      void queryClient.invalidateQueries({ queryKey: ['messages', { campaignId: id, status: messageFilter }] });
+    }
+  }, [id, messageFilter, queryClient]);
+
+  const handleCompleted = useCallback((data: unknown) => {
+    const ev = data as { campaignId?: number; name?: string };
+    if (ev.campaignId === id) {
+      void queryClient.invalidateQueries({ queryKey: getGetCampaignQueryKey(id) });
+      void queryClient.invalidateQueries({ queryKey: ['messages', { campaignId: id, status: messageFilter }] });
+      toast({ title: `Campaign "${ev.name ?? ''}" completed` });
+    }
+  }, [id, messageFilter, queryClient, toast]);
+
+  useWebSocket("campaign:progress", handleProgress);
+  useWebSocket("campaign:completed", handleCompleted);
 
   if (!id) {
     return <div>Invalid campaign ID</div>;

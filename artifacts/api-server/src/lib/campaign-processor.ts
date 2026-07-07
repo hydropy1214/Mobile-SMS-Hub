@@ -1,11 +1,17 @@
 import { eq, and } from "drizzle-orm";
-import { db, campaignsTable, messagesTable, contactListContactsTable, contactsTable, activityLogTable } from "@workspace/db";
-import { broadcast } from "./ws-server";
+import {
+  db,
+  campaignsTable,
+  messagesTable,
+  contactListContactsTable,
+  contactsTable,
+  activityLogTable,
+} from "@workspace/db";
+import { broadcast, sendToDevice } from "./ws-server";
 import { logger } from "./logger";
 
-const BATCH_SIZE = 5; // messages to send per tick per campaign
+const BATCH_SIZE = 5; // messages to dispatch per tick per campaign
 const TICK_MS = 3000; // process every 3 seconds
-const SUCCESS_RATE = 0.96; // 96% message delivery success
 
 async function processCampaign(campaign: typeof campaignsTable.$inferSelect) {
   // Find queued messages for this campaign
@@ -39,26 +45,53 @@ async function processCampaign(campaign: typeof campaignsTable.$inferSelect) {
     return;
   }
 
-  // Process batch
   const now = new Date();
+
   for (const msg of queued) {
-    const status = Math.random() < SUCCESS_RATE ? "sent" : "failed";
+    let status: "sent" | "failed" = "failed";
+
+    if (campaign.deviceId) {
+      // Push message to the physical device via WebSocket.
+      // The device's mobile page will open the SMS app for each dispatched message.
+      const dispatched = sendToDevice(campaign.deviceId, "sms:dispatch", {
+        messageId: msg.id,
+        campaignId: campaign.id,
+        phoneNumber: msg.phoneNumber,
+        messageText: msg.messageText ?? "",
+      });
+
+      if (dispatched) {
+        status = "sent"; // dispatched to device successfully
+      } else {
+        // Device is not connected — fail this message
+        status = "failed";
+        await db.insert(activityLogTable).values({
+          type: "message_failed",
+          description: `Message to ${msg.phoneNumber} failed — device offline in "${campaign.name}"`,
+          relatedId: campaign.id,
+        });
+        logger.warn({ messageId: msg.id, deviceId: campaign.deviceId }, "Device not connected, message failed");
+      }
+    } else {
+      // No device assigned — fail
+      await db.insert(activityLogTable).values({
+        type: "message_failed",
+        description: `Message to ${msg.phoneNumber} failed — no device assigned to "${campaign.name}"`,
+        relatedId: campaign.id,
+      });
+    }
+
     await db
       .update(messagesTable)
       .set({ status, sentAt: now })
       .where(eq(messagesTable.id, msg.id));
-
-    if (status === "failed") {
-      await db.insert(activityLogTable).values({
-        type: "message_failed",
-        description: `Message to ${msg.phoneNumber} failed in "${campaign.name}"`,
-        relatedId: campaign.id,
-      });
-    }
   }
 
   // Recount
-  const allMsgs = await db.select().from(messagesTable).where(eq(messagesTable.campaignId, campaign.id));
+  const allMsgs = await db
+    .select()
+    .from(messagesTable)
+    .where(eq(messagesTable.campaignId, campaign.id));
   const sentCount = allMsgs.filter((m) => m.status === "sent" || m.status === "delivered").length;
   const failedCount = allMsgs.filter((m) => m.status === "failed").length;
 
@@ -90,17 +123,19 @@ async function tick() {
 
     // Check for scheduled campaigns that should start now
     const now = new Date();
-    const scheduled = await db.select().from(campaignsTable).where(eq(campaignsTable.status, "draft"));
-    for (const c of scheduled) {
+    const drafts = await db.select().from(campaignsTable).where(eq(campaignsTable.status, "draft"));
+    for (const c of drafts) {
       if (c.scheduledAt && c.scheduledAt <= now && c.contactListId) {
-        // Auto-start: queue messages
         const members = await db
           .select({ contactId: contactListContactsTable.contactId })
           .from(contactListContactsTable)
           .where(eq(contactListContactsTable.listId, c.contactListId));
 
         for (const member of members) {
-          const [contact] = await db.select().from(contactsTable).where(eq(contactsTable.id, member.contactId));
+          const [contact] = await db
+            .select()
+            .from(contactsTable)
+            .where(eq(contactsTable.id, member.contactId));
           if (contact) {
             await db.insert(messagesTable).values({
               campaignId: c.id,
@@ -125,7 +160,11 @@ async function tick() {
           relatedId: c.id,
         });
 
-        broadcast("campaign:started", { campaignId: c.id, name: c.name, totalCount: updated.totalCount });
+        broadcast("campaign:started", {
+          campaignId: c.id,
+          name: c.name,
+          totalCount: updated.totalCount,
+        });
         logger.info({ campaignId: c.id }, "Scheduled campaign auto-started");
       }
     }
@@ -135,6 +174,8 @@ async function tick() {
 }
 
 export function startCampaignProcessor(): void {
-  setInterval(() => { void tick(); }, TICK_MS);
+  setInterval(() => {
+    void tick();
+  }, TICK_MS);
   logger.info({ tickMs: TICK_MS }, "Campaign processor started");
 }

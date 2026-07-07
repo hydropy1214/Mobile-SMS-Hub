@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState } from "react";
 import { 
   useListDevices, 
   getListDevicesQueryKey,
@@ -61,6 +61,7 @@ import {
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
+import { QRCodeSVG } from "qrcode.react";
 
 const formSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
@@ -320,11 +321,13 @@ function ConnectDialog({ deviceId, onClose }: { deviceId: number | null, onClose
             <Skeleton className="w-48 h-48 rounded-md" />
           ) : connectInfo ? (
             <div className="space-y-6 flex flex-col items-center w-full">
-              <div className="bg-white p-4 rounded-lg border">
-                {/* Fallback to text if QR generation isn't handled by the backend payload natively */}
-                <div className="w-48 h-48 bg-muted flex items-center justify-center border border-dashed rounded text-xs text-center text-muted-foreground overflow-hidden">
-                  <span className="p-2 break-all">{connectInfo.qrData}</span>
-                </div>
+              <div className="bg-white p-4 rounded-xl border shadow-sm">
+                <QRCodeSVG
+                  value={connectInfo.qrData}
+                  size={200}
+                  level="H"
+                  includeMargin={false}
+                />
               </div>
               
               <div className="w-full space-y-2">

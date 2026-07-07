@@ -41,4 +41,46 @@ router.get("/messages", async (req, res) => {
   res.json(result);
 });
 
+/**
+ * Called by the mobile page after the SMS app was opened for a message.
+ * Requires the device token via Authorization header so only the owning
+ * device can confirm its own messages.
+ */
+router.patch("/messages/:id/confirm", async (req, res) => {
+  const id = Number(req.params.id);
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid message id" }); return; }
+
+  const { status } = req.body as { status?: unknown };
+  if (!status || !["sent", "delivered", "failed"].includes(status as string)) {
+    res.status(400).json({ error: "status must be one of: sent, delivered, failed" });
+    return;
+  }
+
+  const [msg] = await db.select().from(messagesTable).where(eq(messagesTable.id, id));
+  if (!msg) { res.status(404).json({ error: "Message not found" }); return; }
+
+  // Authenticate: device token required when the message has a device
+  if (msg.deviceId) {
+    const providedToken =
+      (req.query["token"] as string | undefined) ??
+      req.headers.authorization?.replace(/^Bearer\s+/i, "");
+    const [device] = await db
+      .select({ token: devicesTable.token })
+      .from(devicesTable)
+      .where(eq(devicesTable.id, msg.deviceId));
+    if (!device || !providedToken || device.token !== providedToken) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+  }
+
+  const [updated] = await db
+    .update(messagesTable)
+    .set({ status: status as string, sentAt: new Date() })
+    .where(eq(messagesTable.id, id))
+    .returning();
+
+  res.json({ ...updated, sentAt: updated.sentAt?.toISOString() ?? null, createdAt: updated.createdAt.toISOString() });
+});
+
 export default router;

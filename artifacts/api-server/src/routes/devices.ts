@@ -136,8 +136,13 @@ router.get("/devices/:id/connect", async (req, res) => {
   const [device] = await db.select().from(devicesTable).where(eq(devicesTable.id, id));
   if (!device) { res.status(404).json({ error: "Device not found" }); return; }
 
-  const proto = (req.headers["x-forwarded-proto"] as string | undefined) ?? "https";
-  const host = req.headers.host ?? "localhost";
+  // Prefer REPLIT_DEV_DOMAIN (always the correct public domain on Replit).
+  // Fall back to the forwarded host header for self-hosted deployments.
+  const replitDomain = process.env["REPLIT_DEV_DOMAIN"];
+  const proto = replitDomain
+    ? "https"
+    : ((req.headers["x-forwarded-proto"] as string | undefined) ?? "https");
+  const host = replitDomain ?? (req.headers.host ?? "localhost");
   // QR code encodes the mobile-gateway page URL — what the phone opens
   const mobileUrl = `${proto}://${host}/mobile?deviceId=${id}&token=${device.token}`;
 
