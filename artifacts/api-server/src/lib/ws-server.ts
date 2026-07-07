@@ -1,4 +1,4 @@
-import { WebSocketServer, type WebSocket, OPEN } from "ws";
+import { WebSocketServer, WebSocket } from "ws";
 import type { Server } from "http";
 import { logger } from "./logger";
 
@@ -33,7 +33,7 @@ export function broadcast(event: string, data: unknown): void {
   if (!wss) return;
   const message = JSON.stringify({ event, data, ts: new Date().toISOString() });
   for (const client of clients) {
-    if (client.readyState === OPEN) {
+    if (client.readyState === WebSocket.OPEN) {
       try {
         client.send(message);
       } catch {

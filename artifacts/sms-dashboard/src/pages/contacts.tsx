@@ -54,7 +54,7 @@ import {
 import { format } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
 import { useLocation } from "wouter";
-import { Contact } from "@workspace/api-client-react/src/generated/api.schemas";
+import { Contact } from "@workspace/api-client-react";
 
 const formSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),

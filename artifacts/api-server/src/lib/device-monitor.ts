@@ -1,4 +1,4 @@
-import { and, lt, ne } from "drizzle-orm";
+import { and, eq, lt, ne } from "drizzle-orm";
 import { db, devicesTable, activityLogTable } from "@workspace/db";
 import { broadcast } from "./ws-server";
 import { logger } from "./logger";
@@ -20,7 +20,7 @@ async function checkDevices() {
       await db
         .update(devicesTable)
         .set({ status: "offline" })
-        .where(lt(devicesTable.lastSeen, threshold));
+        .where(eq(devicesTable.id, device.id));
 
       await db.insert(activityLogTable).values({
         type: "device_disconnected",
