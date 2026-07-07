@@ -415,6 +415,8 @@ function MessageStatusBadge({ status }: { status: string }) {
       return <Badge variant="outline" className="text-[10px] py-0 h-5 bg-emerald-500/10 text-emerald-600 border-emerald-500/20 font-mono uppercase tracking-wider">Sent</Badge>;
     case 'failed':
       return <Badge variant="outline" className="text-[10px] py-0 h-5 bg-destructive/10 text-destructive border-destructive/20 font-mono uppercase tracking-wider">Failed</Badge>;
+    case 'dispatched':
+      return <Badge variant="outline" className="text-[10px] py-0 h-5 bg-blue-500/10 text-blue-600 border-blue-500/20 font-mono uppercase tracking-wider">In Transit</Badge>;
     case 'queued':
     default:
       return <Badge variant="outline" className="text-[10px] py-0 h-5 bg-muted text-muted-foreground font-mono uppercase tracking-wider border-border/50">Queued</Badge>;

@@ -1,9 +1,11 @@
+import { useCallback } from "react";
 import { 
   useGetDashboardStats, 
   getGetDashboardStatsQueryKey,
   useGetDashboardActivity,
   getGetDashboardActivityQueryKey
 } from "@workspace/api-client-react";
+import { useWebSocket } from "@/hooks/use-websocket";
 import { 
   Card, 
   CardContent, 
@@ -30,8 +32,11 @@ import {
   Clock
 } from "lucide-react";
 import { format } from "date-fns";
+import { useQueryClient } from "@tanstack/react-query";
 
 export default function Dashboard() {
+  const queryClient = useQueryClient();
+
   const { data: stats, isLoading: statsLoading } = useGetDashboardStats({
     query: {
       queryKey: getGetDashboardStatsQueryKey()
@@ -43,6 +48,21 @@ export default function Dashboard() {
       queryKey: getGetDashboardActivityQueryKey()
     }
   });
+
+  // Real-time: refresh stats + activity on any meaningful event
+  const refreshDashboard = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: getGetDashboardStatsQueryKey() });
+    void queryClient.invalidateQueries({ queryKey: getGetDashboardActivityQueryKey() });
+  }, [queryClient]);
+  useWebSocket("campaign:progress",   refreshDashboard);
+  useWebSocket("campaign:completed",  refreshDashboard);
+  useWebSocket("campaign:started",    refreshDashboard);
+  useWebSocket("campaign:paused",     refreshDashboard);
+  useWebSocket("campaign:cancelled",  refreshDashboard);
+  useWebSocket("device:status",       refreshDashboard);
+  useWebSocket("device:registered",   refreshDashboard);
+  useWebSocket("device:removed",      refreshDashboard);
+  useWebSocket("device:offline",      refreshDashboard);
 
   return (
     <div className="space-y-6">

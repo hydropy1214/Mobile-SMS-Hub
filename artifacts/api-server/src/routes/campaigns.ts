@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   db,
   campaignsTable,
@@ -98,47 +98,72 @@ router.patch("/campaigns/:id/send", async (req, res) => {
   const [campaign] = await db.select().from(campaignsTable).where(eq(campaignsTable.id, id));
   if (!campaign) { res.status(404).json({ error: "Campaign not found" }); return; }
 
+  // Only allow valid transitions: draft → sending or paused → sending
+  if (campaign.status !== "draft" && campaign.status !== "paused") {
+    res.status(400).json({ error: `Cannot start a campaign with status "${campaign.status}"` });
+    return;
+  }
+
+  const isResume = campaign.status === "paused";
+
   const updated = await db.transaction(async (tx) => {
     let totalCount = campaign.totalCount;
 
-    // Queue messages for processing by the campaign processor background job
-    if (campaign.contactListId) {
-      const members = await tx
-        .select({ contactId: contactListContactsTable.contactId })
-        .from(contactListContactsTable)
-        .where(eq(contactListContactsTable.listId, campaign.contactListId));
-
-      // Remove any existing queued/failed messages from previous send attempts
+    if (isResume) {
+      // ── Resume: just flip status back to sending.
+      // Preserve all existing messages (sent, failed, queued) — don't re-send to already-contacted people.
+      // Re-mark any "dispatched" messages back to "queued" so the processor re-dispatches them.
       await tx
-        .delete(messagesTable)
-        .where(eq(messagesTable.campaignId, id));
+        .update(messagesTable)
+        .set({ status: "queued" })
+        .where(and(eq(messagesTable.campaignId, id), eq(messagesTable.status, "dispatched")));
 
-      for (const member of members) {
-        const [contact] = await tx.select().from(contactsTable).where(eq(contactsTable.id, member.contactId));
-        if (contact) {
-          await tx.insert(messagesTable).values({
-            campaignId: id,
-            contactId: contact.id,
-            deviceId: campaign.deviceId,
-            phoneNumber: contact.phoneNumber,
-            messageText: campaign.message,
-            status: "queued",
-          });
+    } else {
+      // ── Fresh start (draft → sending): build the message queue from the contact list.
+      if (campaign.contactListId) {
+        const members = await tx
+          .select({ contactId: contactListContactsTable.contactId })
+          .from(contactListContactsTable)
+          .where(eq(contactListContactsTable.listId, campaign.contactListId));
+
+        // Remove any leftover messages from a previous aborted attempt
+        await tx
+          .delete(messagesTable)
+          .where(and(eq(messagesTable.campaignId, id)));
+
+        for (const member of members) {
+          const [contact] = await tx.select().from(contactsTable).where(eq(contactsTable.id, member.contactId));
+          if (contact) {
+            await tx.insert(messagesTable).values({
+              campaignId: id,
+              contactId: contact.id,
+              deviceId: campaign.deviceId,
+              phoneNumber: contact.phoneNumber,
+              messageText: campaign.message,
+              status: "queued",
+            });
+          }
         }
-      }
 
-      totalCount = (await tx.select().from(messagesTable).where(eq(messagesTable.campaignId, id))).length;
+        totalCount = (await tx.select().from(messagesTable).where(eq(messagesTable.campaignId, id))).length;
+      }
     }
 
     const [updated] = await tx
       .update(campaignsTable)
-      .set({ status: "sending", startedAt: new Date(), sentCount: 0, failedCount: 0, totalCount })
+      .set({
+        status: "sending",
+        startedAt: campaign.startedAt ?? new Date(),
+        ...(isResume ? {} : { sentCount: 0, failedCount: 0, totalCount }),
+      })
       .where(eq(campaignsTable.id, id))
       .returning();
 
     await tx.insert(activityLogTable).values({
       type: "campaign_started",
-      description: `Campaign "${campaign.name}" started`,
+      description: isResume
+        ? `Campaign "${campaign.name}" resumed`
+        : `Campaign "${campaign.name}" started`,
       relatedId: id,
     });
 
@@ -174,11 +199,15 @@ router.patch("/campaigns/:id/cancel", async (req, res) => {
   const [campaign] = await db.select().from(campaignsTable).where(eq(campaignsTable.id, id));
   if (!campaign) { res.status(404).json({ error: "Campaign not found" }); return; }
 
-  // Only mark still-queued messages as failed — preserve sent/delivered history
+  // Mark queued AND dispatched messages as failed — preserve sent/delivered history.
+  // Dispatched messages must also be cancelled so the mobile device stops processing them.
   await db
     .update(messagesTable)
     .set({ status: "failed" })
-    .where(and(eq(messagesTable.campaignId, id), eq(messagesTable.status, "queued")));
+    .where(and(
+      eq(messagesTable.campaignId, id),
+      inArray(messagesTable.status, ["queued", "dispatched"]),
+    ));
 
   // Recompute accurate counts after cancellation
   const allMsgs = await db.select().from(messagesTable).where(eq(messagesTable.campaignId, id));

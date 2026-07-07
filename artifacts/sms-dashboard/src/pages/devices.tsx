@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { 
   useListDevices, 
   getListDevicesQueryKey,
@@ -7,6 +7,7 @@ import {
   useGetDeviceConnect
 } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
+import { useWebSocket } from "@/hooks/use-websocket";
 import { 
   Card, 
   CardContent, 
@@ -83,6 +84,15 @@ export default function Devices() {
 
   const createDevice = useCreateDevice();
   const deleteDevice = useDeleteDevice();
+
+  // Real-time: refresh device list on status / registration events
+  const invalidateDevices = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: getListDevicesQueryKey() });
+  }, [queryClient]);
+  useWebSocket("device:status",     invalidateDevices);
+  useWebSocket("device:registered", invalidateDevices);
+  useWebSocket("device:removed",    invalidateDevices);
+  useWebSocket("device:offline",    invalidateDevices);
 
   const form = useForm<z.infer<typeof formSchema>>({
     resolver: zodResolver(formSchema),

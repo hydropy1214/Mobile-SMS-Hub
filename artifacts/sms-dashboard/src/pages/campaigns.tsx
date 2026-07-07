@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { 
   useListCampaigns,
   getListCampaignsQueryKey,
@@ -11,6 +11,7 @@ import {
   useListContactLists
 } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
+import { useWebSocket } from "@/hooks/use-websocket";
 import { 
   Card, 
   CardContent,
@@ -101,6 +102,16 @@ export default function Campaigns() {
   const sendCampaign = useSendCampaign();
   const pauseCampaign = usePauseCampaign();
   const cancelCampaign = useCancelCampaign();
+
+  // Real-time: refresh campaign list on any campaign event
+  const invalidateCampaigns = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: getListCampaignsQueryKey() });
+  }, [queryClient]);
+  useWebSocket("campaign:progress",   invalidateCampaigns);
+  useWebSocket("campaign:completed",  invalidateCampaigns);
+  useWebSocket("campaign:started",    invalidateCampaigns);
+  useWebSocket("campaign:paused",     invalidateCampaigns);
+  useWebSocket("campaign:cancelled",  invalidateCampaigns);
 
   const form = useForm<z.infer<typeof campaignFormSchema>>({
     resolver: zodResolver(campaignFormSchema),
