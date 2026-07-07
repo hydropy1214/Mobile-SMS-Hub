@@ -321,4 +321,234 @@ done
   res.send(script);
 });
 
+/**
+ * GET /api/native/v1/once/:token
+ *
+ * One-shot polling script — fetches pending messages, sends them, then exits.
+ * Designed to be called by Tasker, cron, or any scheduler every ~30 seconds.
+ * Unlike the daemon script this does NOT loop; the caller handles repetition.
+ */
+router.get("/native/v1/once/:token", async (req, res) => {
+  const token = req.params.token;
+  const [device] = await db
+    .select({ id: devicesTable.id, simSlot: devicesTable.simSlot })
+    .from(devicesTable)
+    .where(eq(devicesTable.token, token));
+
+  if (!device) { res.status(404).json({ error: "Device not found" }); return; }
+
+  const replitDomain = process.env["REPLIT_DEV_DOMAIN"];
+  const proto = replitDomain ? "https" : ((req.headers["x-forwarded-proto"] as string | undefined) ?? "https");
+  const host  = replitDomain ?? (req.headers.host ?? "localhost");
+  const serverOrigin = `${proto}://${host}`;
+
+  const simSlotLine = device.simSlot != null
+    ? `SIM_SLOT=${device.simSlot}`
+    : `SIM_SLOT=""`;
+
+  const script = `#!/data/data/com.termux/files/usr/bin/bash
+# SMS Control — One-Shot Poll (run once per Tasker trigger)
+# Requirements: pkg install termux-api jq -y
+
+SERVER="${serverOrigin}"
+TOKEN="${token}"
+${simSlotLine}
+
+RESPONSE=$(curl -sf -H "Authorization: Bearer $TOKEN" "$SERVER/api/native/v1/messages" 2>/dev/null)
+[ $? -ne 0 ] && exit 1
+
+echo "$RESPONSE" | jq -c '.[]' 2>/dev/null | while read -r msg; do
+  ID=$(echo "$msg" | jq -r '.id')
+  PHONE=$(echo "$msg" | jq -r '.phoneNumber')
+  TEXT=$(echo "$msg" | jq -r '.messageText')
+  MSG_SIM=$(echo "$msg" | jq -r '.simSlot // empty')
+  ACTIVE_SIM=\${MSG_SIM:-\$SIM_SLOT}
+
+  if [ -n "\$ACTIVE_SIM" ]; then
+    termux-sms-send -s "\$ACTIVE_SIM" -n "$PHONE" "$TEXT" 2>/dev/null; RC=$?
+  else
+    termux-sms-send -n "$PHONE" "$TEXT" 2>/dev/null; RC=$?
+  fi
+
+  STATUS=$([ $RC -eq 0 ] && echo sent || echo failed)
+  curl -sf -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\
+    -d "{\\"status\\":\\"$STATUS\\"}" "$SERVER/api/native/v1/messages/$ID" >/dev/null 2>&1
+  sleep 1
+done
+`;
+
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="sms-once.sh"');
+  res.send(script);
+});
+
+/**
+ * GET /api/native/v1/python-daemon/:token
+ *
+ * Cross-platform Python 3 daemon script — works on Windows, macOS, Linux.
+ * Users plug in their own SMS sending logic (USB modem, GSM API, etc.)
+ * or use it as a bridge to a local SMS gateway.
+ */
+router.get("/native/v1/python-daemon/:token", async (req, res) => {
+  const token = req.params.token;
+  const [device] = await db
+    .select({ id: devicesTable.id, simSlot: devicesTable.simSlot })
+    .from(devicesTable)
+    .where(eq(devicesTable.token, token));
+
+  if (!device) { res.status(404).json({ error: "Device not found" }); return; }
+
+  const replitDomain = process.env["REPLIT_DEV_DOMAIN"];
+  const proto = replitDomain ? "https" : ((req.headers["x-forwarded-proto"] as string | undefined) ?? "https");
+  const host  = replitDomain ?? (req.headers.host ?? "localhost");
+  const serverOrigin = `${proto}://${host}`;
+
+  const simSlot = device.simSlot;
+
+  const script = `#!/usr/bin/env python3
+"""
+SMS Control — Python Daemon
+Cross-platform (Windows / macOS / Linux).  Runs continuously, polling for
+pending messages and dispatching them through your chosen SMS backend.
+
+Requirements:
+    pip install requests
+
+Usage:
+    python3 sms-daemon.py
+
+Edit the send_sms() function below to integrate your SMS hardware or API.
+"""
+
+import time
+import sys
+import requests
+
+SERVER   = "${serverOrigin}"
+TOKEN    = "${token}"
+SIM_SLOT = ${simSlot != null ? String(simSlot) : "None"}   # None = device default; 0 = SIM1, 1 = SIM2
+POLL_INTERVAL = 4  # seconds
+
+_headers = {
+    "Authorization": f"Bearer {TOKEN}",
+    "Content-Type": "application/json",
+}
+
+
+# ── Implement your SMS backend here ──────────────────────────────────────────
+
+def send_sms(phone: str, text: str, sim_slot) -> bool:
+    """
+    Return True if the message was sent, False on failure.
+
+    Choose ONE of the options below and uncomment it.
+
+    ── Option A: USB / Bluetooth GSM modem (AT commands) ────────────────────
+    import serial, time
+    try:
+        with serial.Serial('/dev/ttyUSB0', 115200, timeout=5) as s:  # adjust port
+            s.write(b'AT+CMGF=1\\r'); time.sleep(0.3)
+            s.write(f'AT+CMGS="{phone}"\\r'.encode()); time.sleep(0.3)
+            s.write(text.encode() + b'\\x1a'); time.sleep(4)
+        return True
+    except Exception as e:
+        print(f"  Modem error: {e}"); return False
+
+    ── Option B: Gammu / python-gammu ───────────────────────────────────────
+    import gammu
+    sm = gammu.StateMachine()
+    sm.ReadConfig(); sm.Init()
+    sm.SendSMS({"Text": text, "SMSC": {"Location": 1}, "Number": phone})
+    return True
+
+    ── Option C: Africa's Talking API ───────────────────────────────────────
+    import africastalking
+    africastalking.initialize('username', 'api_key')
+    sms = africastalking.SMS
+    sms.send(text, [phone])
+    return True
+
+    ── Option D: Twilio ──────────────────────────────────────────────────────
+    from twilio.rest import Client
+    Client('ACCOUNT_SID', 'AUTH_TOKEN').messages.create(
+        body=text, from_='+1234567890', to=phone)
+    return True
+    """
+    # Default: print to terminal (replace with a real implementation above)
+    print(f"  [STUB] Would send to {phone}: {text[:60]!r}")
+    return True   # ← change to False if you want messages marked as failed
+
+
+# ── Daemon loop ───────────────────────────────────────────────────────────────
+
+def main():
+    print("🚀 SMS Control Python daemon started")
+    print(f"   Server  : {SERVER}")
+    print(f"   SIM slot: {SIM_SLOT if SIM_SLOT is not None else 'device default'}")
+    print("   Press Ctrl+C to stop\\n")
+
+    while True:
+        try:
+            r = requests.get(
+                f"{SERVER}/api/native/v1/messages",
+                headers=_headers, timeout=15,
+            )
+            r.raise_for_status()
+            messages = r.json()
+
+            if messages:
+                ts = time.strftime("%H:%M:%S")
+                print(f"[{ts}] 📨 {len(messages)} message(s) to send")
+
+                for msg in messages:
+                    msg_id = msg["id"]
+                    phone  = msg["phoneNumber"]
+                    text   = msg.get("messageText") or ""
+                    slot   = msg.get("simSlot")
+                    if slot is None:
+                        slot = SIM_SLOT
+
+                    ts = time.strftime("%H:%M:%S")
+                    print(f"[{ts}] → {phone} (SIM: {slot if slot is not None else 'default'})…")
+
+                    try:
+                        ok = send_sms(phone, text, slot)
+                        status = "sent" if ok else "failed"
+                    except Exception as exc:
+                        status = "failed"
+                        print(f"  Error: {exc}")
+
+                    try:
+                        requests.patch(
+                            f"{SERVER}/api/native/v1/messages/{msg_id}",
+                            json={"status": status},
+                            headers=_headers, timeout=10,
+                        )
+                    except Exception:
+                        pass
+
+                    icon = "✓" if status == "sent" else "✗"
+                    print(f"[{time.strftime('%H:%M:%S')}] {icon} {status.capitalize()} #{msg_id} → {phone}")
+                    time.sleep(2)
+
+        except KeyboardInterrupt:
+            print("\\nDaemon stopped.")
+            sys.exit(0)
+        except requests.exceptions.ConnectionError:
+            print(f"[{time.strftime('%H:%M:%S')}] ⚠  Server unreachable — retrying…")
+        except Exception as exc:
+            print(f"[{time.strftime('%H:%M:%S')}] ⚠  {exc}")
+
+        time.sleep(POLL_INTERVAL)
+
+
+if __name__ == "__main__":
+    main()
+`;
+
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="sms-daemon.py"');
+  res.send(script);
+});
+
 export default router;

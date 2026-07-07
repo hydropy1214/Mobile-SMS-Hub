@@ -1,1 +1,2 @@
 - [SMS Dispatch Architecture](sms-dispatch-architecture.md) — queued→dispatched→sent state machine; WS fast path + HTTP polling fallback; atomic claiming prevents race conditions.
+- [Dual-SIM & Connection Methods](dual-sim-connection-methods.md) — simSlot column on devices; 6-tab ConnectDialog; Python/Tasker scripts generated client-side (no token in URL).
