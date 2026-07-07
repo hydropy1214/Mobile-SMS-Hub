@@ -56,6 +56,8 @@
     "zod-validation-error": "^3.4.0"
   },
   "dependencies": {
+    "expo-battery": "^57.0.0",
+    "expo-camera": "^57.0.0",
     "expo-sms": "^57.0.0"
   }
 }

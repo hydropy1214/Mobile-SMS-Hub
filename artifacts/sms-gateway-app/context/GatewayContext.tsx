@@ -1,3 +1,11 @@
+/**
+ * GatewayContext — single source of truth for device connection, polling,
+ * SMS dispatch, delivery tracking, and device telemetry.
+ *
+ * One connection method: parse a dashboard connect URL (from QR or paste).
+ * URL format: https://<server>/mobile?deviceId=<id>&token=<token>
+ */
+
 import React, {
   createContext,
   useCallback,
@@ -10,25 +18,45 @@ import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SMS from 'expo-sms';
 import * as Haptics from 'expo-haptics';
+import * as Battery from 'expo-battery';
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface ConnectionDetails {
-  serverUrl: string; // e.g. https://xxx.replit.dev
+  serverUrl: string;   // e.g. https://xxx.replit.dev
   deviceId: number;
   token: string;
+  deviceName?: string;
 }
 
+export type SimLabel = 'SIM 1' | 'SIM 2' | 'Default SIM';
+
+function toSimLabel(slot: number | null | undefined): SimLabel {
+  if (slot === 0) return 'SIM 1';
+  if (slot === 1) return 'SIM 2';
+  return 'Default SIM';
+}
+
+export interface CurrentMessage {
+  id: number;
+  phone: string;
+  text: string;
+  simLabel: SimLabel;
+}
+
+export type MessageStatus = 'sending' | 'sent' | 'failed';
+
 export interface ActivityEntry {
-  id: string;
+  uid: string;
   messageId: number;
   phone: string;
   text: string;
-  status: 'sending' | 'sent' | 'failed';
+  simLabel: SimLabel;
+  status: MessageStatus;
   timestamp: number;
 }
 
-export type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'error';
+export type GatewayStatus = 'idle' | 'connecting' | 'connected' | 'error';
 
 export interface GatewayStats {
   sent: number;
@@ -37,308 +65,411 @@ export interface GatewayStats {
 }
 
 interface GatewayContextValue {
+  status: GatewayStatus;
   connectionDetails: ConnectionDetails | null;
-  status: ConnectionStatus;
+  currentMessage: CurrentMessage | null;
   stats: GatewayStats;
   activity: ActivityEntry[];
+  batteryLevel: number | null;   // 0–100, null if unavailable
+  pollError: boolean;             // true when last N polls failed
   errorMessage: string | null;
+  /** Parse a dashboard connect URL and establish connection */
   connect: (connectUrl: string) => Promise<void>;
-  connectManual: (serverUrl: string, deviceId: string, token: string) => Promise<void>;
   disconnect: () => void;
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-const STORAGE_KEY = '@sms_gateway_v1';
+const STORAGE_KEY = '@sms_gateway_v2';
+const POLL_INTERVAL_MS = 4_000;
+const HEARTBEAT_INTERVAL_MS = 20_000;
+const BATTERY_INTERVAL_MS = 30_000;
+const MAX_ACTIVITY = 80;
+const POLL_ERROR_THRESHOLD = 3;
 
-function makeId() {
-  return Date.now().toString() + Math.random().toString(36).substr(2, 9);
+function uid() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
-function toWsUrl(serverUrl: string) {
-  return serverUrl.replace(/^https/, 'wss').replace(/^http/, 'ws') + '/api/ws';
+function wsUrlOf(serverUrl: string) {
+  return serverUrl.replace(/^https/, 'wss').replace(/^http(?!s)/, 'ws') + '/api/ws';
 }
 
-// ── Context ───────────────────────────────────────────────────────────────────
+async function getBattery(): Promise<number | null> {
+  if (Platform.OS === 'web') return null;
+  try {
+    const level = await Battery.getBatteryLevelAsync();
+    if (level < 0) return null;
+    return Math.round(level * 100);
+  } catch {
+    return null;
+  }
+}
 
-const GatewayContext = createContext<GatewayContextValue | null>(null);
+// ─── Context ──────────────────────────────────────────────────────────────────
+
+const GatewayCtx = createContext<GatewayContextValue | null>(null);
 
 export function GatewayProvider({ children }: { children: React.ReactNode }) {
+  const [status, setStatus] = useState<GatewayStatus>('idle');
   const [connectionDetails, setConnectionDetails] = useState<ConnectionDetails | null>(null);
-  const [status, setStatus] = useState<ConnectionStatus>('idle');
+  const [currentMessage, setCurrentMessage] = useState<CurrentMessage | null>(null);
   const [stats, setStats] = useState<GatewayStats>({ sent: 0, failed: 0, pending: 0 });
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
+  const [batteryLevel, setBatteryLevel] = useState<number | null>(null);
+  const [pollError, setPollError] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Refs for stable access inside callbacks
+  // Stable mutable refs — never stale inside callbacks
   const connRef = useRef<ConnectionDetails | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const wsReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const heartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const processingRef = useRef<Set<number>>(new Set());
-  // Persists sent IDs across polls to prevent double-send on PATCH failure
-  const sentIdsRef = useRef<Set<number>>(new Set());
-  const isConnectedRef = useRef(false);
+  const wsReconnRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const batteryRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const aliveRef = useRef(false);          // true while connected, gates reconnect
+  const processingRef = useRef<Set<number>>(new Set());  // in-flight message IDs
+  const handledRef = useRef<Set<number>>(new Set());     // already dispatched, prevents re-send
+  const pollErrorCountRef = useRef(0);
 
-  // ── Activity helpers ───────────────────────────────────────────────────────
+  // ── Activity helpers ─────────────────────────────────────────────────────
 
-  const addEntry = (entry: Omit<ActivityEntry, 'id'>) => {
-    setActivity((prev) => [{ ...entry, id: makeId() }, ...prev].slice(0, 60));
-  };
+  const addActivity = useCallback((entry: Omit<ActivityEntry, 'uid'>) => {
+    setActivity(prev => [{ ...entry, uid: uid() }, ...prev].slice(0, MAX_ACTIVITY));
+  }, []);
 
-  const updateEntry = (messageId: number, newStatus: ActivityEntry['status']) => {
-    setActivity((prev) =>
-      prev.map((a) => (a.messageId === messageId ? { ...a, status: newStatus } : a))
-    );
-  };
+  const updateActivity = useCallback((messageId: number, status: MessageStatus) => {
+    setActivity(prev => prev.map(a => a.messageId === messageId ? { ...a, status } : a));
+  }, []);
 
-  // ── API helper ────────────────────────────────────────────────────────────
+  // ── API ──────────────────────────────────────────────────────────────────
 
-  const apiCall = (path: string, method = 'GET', body?: object) => {
+  const api = useCallback((path: string, method = 'GET', body?: object) => {
     const d = connRef.current;
     if (!d) return Promise.reject(new Error('Not connected'));
     return fetch(`${d.serverUrl}/api/native/v1${path}`, {
       method,
-      headers: {
-        Authorization: `Bearer ${d.token}`,
-        'Content-Type': 'application/json',
-      },
-      body: body ? JSON.stringify(body) : undefined,
+      headers: { Authorization: `Bearer ${d.token}`, 'Content-Type': 'application/json' },
+      ...(body ? { body: JSON.stringify(body) } : {}),
     });
-  };
+  }, []);
 
-  // ── Message processing ────────────────────────────────────────────────────
+  // ── SMS dispatch ─────────────────────────────────────────────────────────
 
-  const processMessage = useCallback(
-    async (msg: { id: number; phoneNumber: string; messageText: string }) => {
-      if (processingRef.current.has(msg.id) || sentIdsRef.current.has(msg.id)) return;
-      processingRef.current.add(msg.id);
+  const dispatch = useCallback(async (msg: {
+    id: number;
+    phoneNumber: string;
+    messageText: string;
+    simSlot?: number | null;
+  }) => {
+    if (processingRef.current.has(msg.id) || handledRef.current.has(msg.id)) return;
+    processingRef.current.add(msg.id);
 
-      addEntry({ messageId: msg.id, phone: msg.phoneNumber, text: msg.messageText, status: 'sending', timestamp: Date.now() });
-      setStats((s) => ({ ...s, pending: Math.max(0, s.pending - 1) }));
+    const simLabel = toSimLabel(msg.simSlot);
 
-      let finalStatus: 'sent' | 'failed' = 'failed';
-      try {
-        if (Platform.OS !== 'web') {
-          const available = await SMS.isAvailableAsync();
-          if (available) {
-            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-            const { result } = await SMS.sendSMSAsync([msg.phoneNumber], msg.messageText);
-            finalStatus = result === 'cancelled' ? 'failed' : 'sent';
-          }
-        } else {
-          finalStatus = 'sent';
+    setCurrentMessage({ id: msg.id, phone: msg.phoneNumber, text: msg.messageText, simLabel });
+    addActivity({
+      messageId: msg.id,
+      phone: msg.phoneNumber,
+      text: msg.messageText,
+      simLabel,
+      status: 'sending',
+      timestamp: Date.now(),
+    });
+    setStats(s => ({ ...s, pending: Math.max(0, s.pending - 1) }));
+
+    // Haptic cue so user knows something needs attention
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
+
+    let finalStatus: MessageStatus = 'failed';
+
+    try {
+      if (Platform.OS !== 'web') {
+        const available = await SMS.isAvailableAsync();
+        if (available) {
+          const { result } = await SMS.sendSMSAsync([msg.phoneNumber], msg.messageText);
+          // 'cancelled' means user explicitly cancelled. 'unknown' typically means sent on Android.
+          finalStatus = result === 'cancelled' ? 'failed' : 'sent';
         }
-      } catch {
-        finalStatus = 'failed';
+      } else {
+        // Web: simulate sent (demo/preview only)
+        finalStatus = 'sent';
       }
+    } catch (err) {
+      finalStatus = 'failed';
+    }
 
-      // Report back to server
-      try { await apiCall(`/messages/${msg.id}`, 'PATCH', { status: finalStatus }); } catch {}
+    // Mark as handled before PATCH so any duplicate poll fetch is rejected
+    handledRef.current.add(msg.id);
 
-      // Track as permanently handled so duplicate polls never re-send
-      sentIdsRef.current.add(msg.id);
+    // Report delivery back to server — retry once on failure
+    let reported = false;
+    for (let attempt = 0; attempt < 2 && !reported; attempt++) {
+      try {
+        const res = await api(`/messages/${msg.id}`, 'PATCH', { status: finalStatus });
+        if (res.ok) reported = true;
+      } catch { /* retry */ }
+    }
 
-      updateEntry(msg.id, finalStatus);
-      setStats((s) => ({
-        ...s,
-        sent: finalStatus === 'sent' ? s.sent + 1 : s.sent,
-        failed: finalStatus === 'failed' ? s.failed + 1 : s.failed,
-      }));
-      processingRef.current.delete(msg.id);
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    []
-  );
+    updateActivity(msg.id, finalStatus);
+    Haptics.impactAsync(
+      finalStatus === 'sent'
+        ? Haptics.ImpactFeedbackStyle.Medium
+        : Haptics.ImpactFeedbackStyle.Heavy
+    ).catch(() => {});
 
-  // ── Polling ───────────────────────────────────────────────────────────────
+    setStats(s => ({
+      ...s,
+      sent: finalStatus === 'sent' ? s.sent + 1 : s.sent,
+      failed: finalStatus === 'failed' ? s.failed + 1 : s.failed,
+    }));
+
+    setCurrentMessage(null);
+    processingRef.current.delete(msg.id);
+  }, [api, addActivity, updateActivity]);
+
+  // ── Polling ──────────────────────────────────────────────────────────────
 
   const poll = useCallback(async () => {
     if (!connRef.current) return;
     try {
-      const res = await apiCall('/messages');
-      if (!res.ok) return;
-      const messages: { id: number; phoneNumber: string; messageText: string }[] = await res.json();
-      setStats((s) => ({ ...s, pending: messages.filter((m) => !processingRef.current.has(m.id)).length }));
-      messages.forEach((m) => processMessage(m));
-    } catch {}
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [processMessage]);
+      const res = await api('/messages');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const messages: { id: number; phoneNumber: string; messageText: string; simSlot?: number | null }[]
+        = await res.json();
 
-  // ── Heartbeat ─────────────────────────────────────────────────────────────
+      pollErrorCountRef.current = 0;
+      setPollError(false);
 
-  const heartbeat = useCallback(() => {
+      const fresh = messages.filter(m => !handledRef.current.has(m.id));
+      setStats(s => ({ ...s, pending: fresh.filter(m => !processingRef.current.has(m.id)).length }));
+      fresh.forEach(m => dispatch(m));
+    } catch {
+      pollErrorCountRef.current += 1;
+      if (pollErrorCountRef.current >= POLL_ERROR_THRESHOLD) setPollError(true);
+    }
+  }, [api, dispatch]);
+
+  // ── Heartbeat ────────────────────────────────────────────────────────────
+
+  const heartbeat = useCallback(async () => {
     if (!connRef.current) return;
-    apiCall('/heartbeat', 'POST', { batteryLevel: null, signalStrength: null }).catch(() => {});
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    const bat = batteryLevel;
+    try {
+      await api('/heartbeat', 'POST', {
+        batteryLevel: bat,
+        signalStrength: null,
+      });
+    } catch { /* non-critical */ }
+  }, [api, batteryLevel]);
+
+  // ── Battery polling ──────────────────────────────────────────────────────
+
+  const refreshBattery = useCallback(async () => {
+    const level = await getBattery();
+    if (level !== null) setBatteryLevel(level);
   }, []);
 
-  // ── WebSocket ─────────────────────────────────────────────────────────────
+  // ── WebSocket ────────────────────────────────────────────────────────────
 
-  const openWs = useCallback(
-    (details: ConnectionDetails) => {
-      if (wsRef.current) { try { wsRef.current.close(); } catch {} }
-      try {
-        const ws = new WebSocket(toWsUrl(details.serverUrl));
-        wsRef.current = ws;
+  const openWs = useCallback((details: ConnectionDetails) => {
+    if (wsRef.current) {
+      try { wsRef.current.close(); } catch { /* ignore */ }
+    }
+    try {
+      const ws = new WebSocket(wsUrlOf(details.serverUrl));
+      wsRef.current = ws;
 
-        ws.onopen = () => {
-          ws.send(JSON.stringify({ event: 'device:register', deviceId: details.deviceId, token: details.token }));
-        };
-
-        ws.onmessage = (event) => {
-          try {
-            const msg = JSON.parse(event.data as string);
-            if (msg.event === 'sms:dispatch' && msg.data) {
-              processMessage({ id: msg.data.messageId, phoneNumber: msg.data.phoneNumber, messageText: msg.data.messageText });
-            }
-          } catch {}
-        };
-
-        ws.onerror = () => {};
-        ws.onclose = () => {
-          if (isConnectedRef.current && connRef.current) {
-            wsReconnectTimerRef.current = setTimeout(() => {
-              if (connRef.current) openWs(connRef.current);
-            }, 5000);
-          }
-        };
-      } catch {}
-    },
-    [processMessage]
-  );
-
-  // ── Core connect flow ─────────────────────────────────────────────────────
-
-  const startConnection = useCallback(
-    async (details: ConnectionDetails) => {
-      connRef.current = details;
-      isConnectedRef.current = false;
-      setConnectionDetails(details);
-      setStatus('connecting');
-      setErrorMessage(null);
-
-      // Validate token
-      try {
-        const res = await fetch(`${details.serverUrl}/api/native/v1/messages`, {
-          headers: { Authorization: `Bearer ${details.token}` },
-        });
-        if (!res.ok) {
-          setStatus('error');
-          setErrorMessage('Token rejected by server. Check the URL.');
-          connRef.current = null;
-          return;
-        }
-      } catch {
-        setStatus('error');
-        setErrorMessage("Can't reach the server. Check the URL and your connection.");
-        connRef.current = null;
-        return;
-      }
-
-      setStatus('connected');
-      isConnectedRef.current = true;
-
-      openWs(details);
-
-      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
-      pollTimerRef.current = setInterval(poll, 4000);
-      poll();
-
-      if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current);
-      heartbeat();
-      heartbeatTimerRef.current = setInterval(heartbeat, 20000);
-    },
-    [openWs, poll, heartbeat]
-  );
-
-  // ── Public API ────────────────────────────────────────────────────────────
-
-  const connect = useCallback(
-    async (connectUrl: string) => {
-      try {
-        const url = new URL(connectUrl.trim());
-        const serverUrl = url.origin;
-        const deviceId = parseInt(url.searchParams.get('deviceId') ?? '0', 10);
-        const token = url.searchParams.get('token') ?? '';
-
-        if (!token) {
-          setStatus('error');
-          setErrorMessage('No token found in URL. Copy the full link from the dashboard.');
-          return;
-        }
-
-        const details: ConnectionDetails = { serverUrl, deviceId, token };
-        await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(details));
-        await startConnection(details);
-      } catch {
-        setStatus('error');
-        setErrorMessage('Invalid URL. Paste the full connect link from your dashboard.');
-      }
-    },
-    [startConnection]
-  );
-
-  const connectManual = useCallback(
-    async (serverUrl: string, deviceId: string, token: string) => {
-      const details: ConnectionDetails = {
-        serverUrl: serverUrl.trim().replace(/\/$/, ''),
-        deviceId: parseInt(deviceId, 10) || 0,
-        token: token.trim(),
+      ws.onopen = () => {
+        ws.send(JSON.stringify({
+          event: 'device:register',
+          deviceId: details.deviceId,
+          token: details.token,
+        }));
       };
-      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(details));
-      await startConnection(details);
-    },
-    [startConnection]
-  );
+
+      ws.onmessage = event => {
+        try {
+          const msg = JSON.parse(event.data as string);
+          if (msg.event === 'sms:dispatch' && msg.data) {
+            dispatch({
+              id: msg.data.messageId,
+              phoneNumber: msg.data.phoneNumber,
+              messageText: msg.data.messageText,
+              simSlot: msg.data.simSlot ?? null,
+            });
+          }
+        } catch { /* malformed frame */ }
+      };
+
+      ws.onerror = () => { /* errors surface in onclose */ };
+
+      ws.onclose = () => {
+        if (!aliveRef.current) return;
+        // Reconnect after 5 s — gates on aliveRef so disconnect() stops it
+        wsReconnRef.current = setTimeout(() => {
+          if (aliveRef.current && connRef.current) openWs(connRef.current);
+        }, 5_000);
+      };
+    } catch { /* WebSocket not available (e.g. web without wss) */ }
+  }, [dispatch]);
+
+  // ── Core connect flow ────────────────────────────────────────────────────
+
+  const startSession = useCallback(async (details: ConnectionDetails) => {
+    connRef.current = details;
+    aliveRef.current = false;
+    setConnectionDetails(details);
+    setStatus('connecting');
+    setErrorMessage(null);
+    setPollError(false);
+    pollErrorCountRef.current = 0;
+
+    // Validate token against the native API
+    let validated = false;
+    try {
+      const res = await fetch(`${details.serverUrl}/api/native/v1/messages`, {
+        headers: { Authorization: `Bearer ${details.token}` },
+        signal: AbortSignal.timeout(8_000),
+      });
+      validated = res.ok;
+    } catch (err: any) {
+      const isTimeout = err?.name === 'TimeoutError' || err?.name === 'AbortError';
+      setStatus('error');
+      setErrorMessage(
+        isTimeout
+          ? 'Server took too long to respond. Check your network connection.'
+          : "Can't reach the server. Make sure your dashboard is running."
+      );
+      connRef.current = null;
+      return;
+    }
+
+    if (!validated) {
+      setStatus('error');
+      setErrorMessage('Connection rejected — the QR code may be expired. Regenerate it from the dashboard.');
+      connRef.current = null;
+      return;
+    }
+
+    // Connected
+    aliveRef.current = true;
+    setStatus('connected');
+
+    // Kick off WebSocket, polling, heartbeat, battery
+    openWs(details);
+
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = setInterval(poll, POLL_INTERVAL_MS);
+    poll();
+
+    if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+    heartbeatRef.current = setInterval(heartbeat, HEARTBEAT_INTERVAL_MS);
+    heartbeat();
+
+    await refreshBattery();
+    if (batteryRef.current) clearInterval(batteryRef.current);
+    batteryRef.current = setInterval(refreshBattery, BATTERY_INTERVAL_MS);
+  }, [openWs, poll, heartbeat, refreshBattery]);
+
+  // ── Public: connect ──────────────────────────────────────────────────────
+
+  const connect = useCallback(async (rawUrl: string) => {
+    const trimmed = rawUrl.trim();
+    if (!trimmed) {
+      setStatus('error');
+      setErrorMessage('No URL found. Scan the QR code from your dashboard or paste the connect link.');
+      return;
+    }
+
+    let url: URL;
+    try {
+      url = new URL(trimmed);
+    } catch {
+      setStatus('error');
+      setErrorMessage('Invalid URL. Scan the QR code from the dashboard Devices page.');
+      return;
+    }
+
+    const token = url.searchParams.get('token');
+    const deviceIdStr = url.searchParams.get('deviceId');
+
+    if (!token) {
+      setStatus('error');
+      setErrorMessage('QR code is missing the device token. Try regenerating it from the dashboard.');
+      return;
+    }
+
+    const deviceId = parseInt(deviceIdStr ?? '0', 10);
+    const serverUrl = url.origin;
+
+    const details: ConnectionDetails = { serverUrl, deviceId, token };
+    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(details)).catch(() => {});
+    await startSession(details);
+  }, [startSession]);
+
+  // ── Public: disconnect ───────────────────────────────────────────────────
 
   const disconnect = useCallback(() => {
-    isConnectedRef.current = false;
+    aliveRef.current = false;
     connRef.current = null;
-    if (wsReconnectTimerRef.current) clearTimeout(wsReconnectTimerRef.current);
-    try { wsRef.current?.close(); } catch {}
+
+    if (wsReconnRef.current) clearTimeout(wsReconnRef.current);
+    try { wsRef.current?.close(); } catch { /* ignore */ }
     wsRef.current = null;
-    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
-    if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current);
+
+    [pollRef, heartbeatRef, batteryRef].forEach(r => {
+      if (r.current) clearInterval(r.current);
+      r.current = null;
+    });
+
     processingRef.current.clear();
-    sentIdsRef.current.clear();
+    handledRef.current.clear();
+    pollErrorCountRef.current = 0;
+
     setConnectionDetails(null);
+    setCurrentMessage(null);
     setStatus('idle');
     setStats({ sent: 0, failed: 0, pending: 0 });
     setActivity([]);
+    setBatteryLevel(null);
+    setPollError(false);
     setErrorMessage(null);
+
     AsyncStorage.removeItem(STORAGE_KEY).catch(() => {});
   }, []);
 
-  // ── Auto-restore on mount ─────────────────────────────────────────────────
+  // ── Auto-restore on mount ────────────────────────────────────────────────
 
   useEffect(() => {
     AsyncStorage.getItem(STORAGE_KEY)
-      .then((raw) => { if (raw) startConnection(JSON.parse(raw)); })
+      .then(raw => { if (raw) startSession(JSON.parse(raw)); })
       .catch(() => {});
+
     return () => {
-      isConnectedRef.current = false;
-      if (wsReconnectTimerRef.current) clearTimeout(wsReconnectTimerRef.current);
-      try { wsRef.current?.close(); } catch {}
-      wsRef.current = null;
-      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
-      if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current);
+      aliveRef.current = false;
+      if (wsReconnRef.current) clearTimeout(wsReconnRef.current);
+      try { wsRef.current?.close(); } catch { /* ignore */ }
+      [pollRef, heartbeatRef, batteryRef].forEach(r => {
+        if (r.current) clearInterval(r.current);
+      });
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
-    <GatewayContext.Provider
-      value={{ connectionDetails, status, stats, activity, errorMessage, connect, connectManual, disconnect }}
-    >
+    <GatewayCtx.Provider value={{
+      status, connectionDetails, currentMessage, stats,
+      activity, batteryLevel, pollError, errorMessage,
+      connect, disconnect,
+    }}>
       {children}
-    </GatewayContext.Provider>
+    </GatewayCtx.Provider>
   );
 }
 
 export function useGateway() {
-  const ctx = useContext(GatewayContext);
-  if (!ctx) throw new Error('useGateway must be used within GatewayProvider');
+  const ctx = useContext(GatewayCtx);
+  if (!ctx) throw new Error('useGateway must be inside GatewayProvider');
   return ctx;
 }

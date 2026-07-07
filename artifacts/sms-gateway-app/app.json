@@ -15,11 +15,15 @@
     },
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.smsgateway.app"
+      "bundleIdentifier": "com.smsgateway.app",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Used to scan the QR code from your dashboard to connect this device as an SMS gateway."
+      }
     },
     "android": {
       "package": "com.smsgateway.app",
       "permissions": [
+        "android.permission.CAMERA",
         "android.permission.SEND_SMS",
         "android.permission.READ_SMS"
       ]
@@ -28,14 +32,15 @@
       "favicon": "./assets/images/icon.png"
     },
     "plugins": [
-      [
-        "expo-router",
-        {
-          "origin": "https://replit.com/"
-        }
-      ],
+      ["expo-router", { "origin": "https://replit.com/" }],
       "expo-font",
-      "expo-web-browser"
+      "expo-web-browser",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow SMS Gateway to use the camera to scan the QR code from your dashboard."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,
