@@ -190,8 +190,8 @@ router.get("/devices/:id/connect", async (req, res) => {
     ? "https"
     : ((req.headers["x-forwarded-proto"] as string | undefined) ?? "https");
   const host = replitDomain ?? (req.headers.host ?? "localhost");
-  // QR code encodes the setup-assistant page URL — what the phone opens
-  const mobileUrl = `${proto}://${host}/setup?deviceId=${id}&token=${device.token}`;
+  // QR code encodes the mobile landing page URL — what the phone opens
+  const mobileUrl = `${proto}://${host}/mobile?deviceId=${id}&token=${device.token}`;
 
   res.json({
     token: device.token,
