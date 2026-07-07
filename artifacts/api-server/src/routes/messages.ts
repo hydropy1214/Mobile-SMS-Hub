@@ -59,11 +59,10 @@ router.patch("/messages/:id/confirm", async (req, res) => {
   const [msg] = await db.select().from(messagesTable).where(eq(messagesTable.id, id));
   if (!msg) { res.status(404).json({ error: "Message not found" }); return; }
 
-  // Authenticate: device token required when the message has a device
+  // Authenticate: device token required when the message has a device.
+  // Bearer header only — no query-param token to avoid URL credential leakage.
   if (msg.deviceId) {
-    const providedToken =
-      (req.query["token"] as string | undefined) ??
-      req.headers.authorization?.replace(/^Bearer\s+/i, "");
+    const providedToken = req.headers.authorization?.replace(/^Bearer\s+/i, "");
     const [device] = await db
       .select({ token: devicesTable.token })
       .from(devicesTable)

@@ -9,424 +9,427 @@ import {
   AlertTriangle,
   Loader2,
   MessageSquare,
-  Send,
+  ExternalLink,
+  RefreshCw,
 } from "lucide-react";
 
-const HEARTBEAT_INTERVAL_MS = 25_000; // 25 seconds
+const HEARTBEAT_INTERVAL_MS = 20_000; // 20 seconds
+const POLL_INTERVAL_MS = 5_000;       // poll for pending messages every 5 s
 
 interface DeviceInfo {
   deviceId: number;
   token: string;
 }
 
-interface SmsDispatch {
+interface SmsItem {
   messageId: number;
-  campaignId: number;
+  campaignId: number | null;
   phoneNumber: string;
   messageText: string;
-  openedAt?: number;
+  /** undefined = pending, "opened" = SMS app launched, "done" = confirmed */
+  state: "pending" | "opened" | "done";
 }
 
-type ConnectionStatus = "connecting" | "connected" | "error" | "invalid";
+type ConnStatus = "connecting" | "connected" | "error" | "invalid";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 function parseParams(): DeviceInfo | null {
-  const params = new URLSearchParams(window.location.search);
-  const deviceId = params.get("deviceId");
-  const token = params.get("token");
+  const p = new URLSearchParams(window.location.search);
+  const deviceId = p.get("deviceId");
+  const token = p.get("token");
   if (!deviceId || !token || isNaN(Number(deviceId))) return null;
   return { deviceId: Number(deviceId), token };
 }
 
-async function sendHeartbeat(
-  info: DeviceInfo,
-  battery: number | null,
-  signal: number | null,
-): Promise<boolean> {
+async function apiPatch(path: string, token: string, body: unknown): Promise<boolean> {
   try {
-    const res = await fetch(`/api/devices/${info.deviceId}/heartbeat`, {
+    const r = await fetch(path, {
       method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${info.token}`,
-      },
-      body: JSON.stringify({
-        status: "online",
-        batteryLevel: battery,
-        signalStrength: signal,
-      }),
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
     });
-    return res.ok;
+    return r.ok;
   } catch {
     return false;
   }
 }
 
-async function confirmMessage(
-  info: DeviceInfo,
-  messageId: number,
-  status: "sent" | "failed",
-): Promise<void> {
+async function sendHeartbeat(info: DeviceInfo, battery: number | null, signal: number | null) {
+  return apiPatch(`/api/devices/${info.deviceId}/heartbeat`, info.token, {
+    status: "online",
+    batteryLevel: battery,
+    signalStrength: signal,
+  });
+}
+
+async function confirmMessage(info: DeviceInfo, messageId: number, status: "sent" | "failed") {
+  return apiPatch(`/api/messages/${messageId}/confirm`, info.token, { status });
+}
+
+async function fetchPendingMessages(info: DeviceInfo): Promise<SmsItem[]> {
   try {
-    await fetch(`/api/messages/${messageId}/confirm`, {
-      method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${info.token}`,
-      },
-      body: JSON.stringify({ status }),
+    const r = await fetch(`/api/devices/${info.deviceId}/pending-messages`, {
+      headers: { Authorization: `Bearer ${info.token}` },
     });
+    if (!r.ok) return [];
+    const rows = (await r.json()) as { id: number; campaignId: number | null; phoneNumber: string; messageText: string | null }[];
+    return rows.map((m) => ({
+      messageId: m.id,
+      campaignId: m.campaignId,
+      phoneNumber: m.phoneNumber,
+      messageText: m.messageText ?? "",
+      state: "pending" as const,
+    }));
   } catch {
-    // best-effort
+    return [];
   }
 }
 
-function getBatteryLevel(): Promise<number | null> {
+function getBattery(): Promise<number | null> {
   return new Promise((resolve) => {
     if ("getBattery" in navigator) {
       (navigator as unknown as { getBattery: () => Promise<{ level: number }> })
         .getBattery()
-        .then((bat) => resolve(Math.round(bat.level * 100)))
+        .then((b) => resolve(Math.round(b.level * 100)))
         .catch(() => resolve(null));
-    } else {
-      resolve(null);
-    }
+    } else resolve(null);
   });
 }
 
-function getSignalStrength(): number | null {
+function getSignal(): number | null {
   const conn = (navigator as unknown as { connection?: { effectiveType?: string } }).connection;
-  if (!conn) return null;
-  const map: Record<string, number> = { "slow-2g": 1, "2g": 2, "3g": 3, "4g": 4 };
-  return conn.effectiveType ? (map[conn.effectiveType] ?? null) : null;
+  if (!conn?.effectiveType) return null;
+  return ({ "slow-2g": 1, "2g": 2, "3g": 3, "4g": 4 } as Record<string, number>)[conn.effectiveType] ?? null;
 }
 
-function getWsUrl(): string {
+function getWsUrl() {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${proto}//${window.location.host}/api/ws`;
 }
 
+/**
+ * Open the native SMS app without navigating the current page away.
+ * Uses an invisible <a> with target="_blank" so the WebSocket stays alive.
+ */
+function openSmsApp(phone: string, body: string) {
+  const a = document.createElement("a");
+  a.href = `sms:${encodeURIComponent(phone)}?body=${encodeURIComponent(body)}`;
+  a.rel = "noopener noreferrer";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
+
 export default function MobilePage() {
-  const [status, setStatus] = useState<ConnectionStatus>("connecting");
-  const [wsConnected, setWsConnected] = useState(false);
+  const [connStatus, setConnStatus] = useState<ConnStatus>("connecting");
+  const [wsRegistered, setWsRegistered] = useState(false);
   const [lastPing, setLastPing] = useState<Date | null>(null);
   const [battery, setBattery] = useState<number | null>(null);
   const [signal, setSignal] = useState<number | null>(null);
   const [pingCount, setPingCount] = useState(0);
-  const [smsQueue, setSmsQueue] = useState<SmsDispatch[]>([]);
-  const [processingId, setProcessingId] = useState<number | null>(null);
+  const [queue, setQueue] = useState<SmsItem[]>([]);
+  const [pollError, setPollError] = useState(false);
 
   const infoRef = useRef<DeviceInfo | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
-  // Open the SMS app for a queued message, then confirm after a short delay
-  const processSms = useCallback(async (msg: SmsDispatch) => {
-    const info = infoRef.current;
-    if (!info) return;
-
-    setProcessingId(msg.messageId);
-
-    // Build the SMS intent URI — Android and iOS will open the native SMS app
-    const smsUri = `sms:${encodeURIComponent(msg.phoneNumber)}?body=${encodeURIComponent(msg.messageText)}`;
-    window.location.href = smsUri;
-
-    // Wait briefly then confirm sent (best-effort; user may have tapped Send)
-    await new Promise((r) => setTimeout(r, 6000));
-    await confirmMessage(info, msg.messageId, "sent");
-
-    setSmsQueue((q) => q.filter((m) => m.messageId !== msg.messageId));
-    setProcessingId(null);
+  // Merge incoming items into the queue without creating duplicates
+  const mergeItems = useCallback((incoming: SmsItem[]) => {
+    setQueue((prev) => {
+      const existingIds = new Set(prev.map((m) => m.messageId));
+      const fresh = incoming.filter((m) => !existingIds.has(m.messageId));
+      return fresh.length ? [...prev, ...fresh] : prev;
+    });
   }, []);
 
-  // Auto-process the next queued message whenever the queue changes and we're idle
-  useEffect(() => {
-    if (processingId !== null) return;
-    const next = smsQueue.find((m) => m.openedAt === undefined);
-    if (!next) return;
-
-    // Mark as in-progress immediately so this effect doesn't fire again
-    setSmsQueue((q) =>
-      q.map((m) => (m.messageId === next.messageId ? { ...m, openedAt: Date.now() } : m)),
-    );
-    void processSms(next);
-  }, [smsQueue, processingId, processSms]);
-
-  // Establish WebSocket and register as device
+  // ── WebSocket (fast path for push dispatch) ────────────────────────────
   useEffect(() => {
     const info = parseParams();
-    if (!info) {
-      setStatus("invalid");
-      return;
-    }
+    if (!info) { setConnStatus("invalid"); return; }
     infoRef.current = info;
 
-    let ws: WebSocket;
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let destroyed = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
     function connect() {
       if (destroyed) return;
-      ws = new WebSocket(getWsUrl());
+      const ws = new WebSocket(getWsUrl());
       wsRef.current = ws;
 
       ws.onopen = () => {
-        setWsConnected(true);
-        // Register this browser as the gateway for this device
-        ws.send(
-          JSON.stringify({
-            event: "device:register",
-            deviceId: info!.deviceId,
-            token: info!.token,
-          }),
-        );
+        ws.send(JSON.stringify({ event: "device:register", deviceId: info!.deviceId, token: info!.token }));
       };
 
-      ws.onmessage = (event) => {
+      ws.onmessage = (ev) => {
         try {
-          const msg = JSON.parse(event.data as string) as { event: string; data: unknown };
-
-          if (msg.event === "sms:dispatch") {
-            const d = msg.data as SmsDispatch;
-            setSmsQueue((q) => {
-              // Avoid duplicates
-              if (q.some((m) => m.messageId === d.messageId)) return q;
-              return [...q, d];
-            });
+          const msg = JSON.parse(ev.data as string) as { event: string; data: unknown };
+          if (msg.event === "device:register:ok") {
+            setWsRegistered(true);
+          } else if (msg.event === "device:register:error") {
+            setConnStatus("error");
+          } else if (msg.event === "sms:dispatch") {
+            const d = msg.data as { messageId: number; campaignId: number; phoneNumber: string; messageText: string };
+            mergeItems([{ ...d, state: "pending" }]);
           }
-        } catch {
-          // ignore
-        }
+        } catch { /* ignore */ }
       };
 
       ws.onclose = () => {
-        setWsConnected(false);
+        setWsRegistered(false);
         wsRef.current = null;
-        if (!destroyed) {
-          reconnectTimer = setTimeout(connect, 3000);
-        }
+        if (!destroyed) reconnectTimer = setTimeout(connect, 3000);
       };
 
-      ws.onerror = () => {
-        ws.close();
-      };
+      ws.onerror = () => ws.close();
     }
 
     connect();
-
     return () => {
       destroyed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
-      ws?.close();
+      wsRef.current?.close();
     };
-  }, []);
+  }, [mergeItems]);
 
-  // Heartbeat loop — keeps device status "online" in the database
+  // ── Heartbeat (keeps device "online" in DB) ────────────────────────────
   useEffect(() => {
     const info = infoRef.current;
     if (!info) return;
 
     async function ping() {
-      const bat = await getBatteryLevel();
-      const sig = getSignalStrength();
+      const bat = await getBattery();
+      const sig = getSignal();
       setBattery(bat);
       setSignal(sig);
       const ok = await sendHeartbeat(info!, bat, sig);
       if (ok) {
-        setStatus("connected");
+        setConnStatus("connected");
         setLastPing(new Date());
         setPingCount((n) => n + 1);
       } else {
-        setStatus("error");
+        setConnStatus("error");
       }
     }
 
     void ping();
-    const interval = setInterval(() => {
-      void ping();
-    }, HEARTBEAT_INTERVAL_MS);
-    return () => clearInterval(interval);
+    const id = setInterval(() => void ping(), HEARTBEAT_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, []); // runs once; infoRef is stable
+
+  // ── HTTP polling (reliable fallback) ───────────────────────────────────
+  useEffect(() => {
+    const info = infoRef.current;
+    if (!info) return;
+
+    async function poll() {
+      const items = await fetchPendingMessages(info!);
+      if (items.length > 0) {
+        setPollError(false);
+        mergeItems(items);
+      } else if (items.length === 0) {
+        // 0 items can mean genuinely empty OR a fetch error (handled inside fetchPendingMessages)
+        setPollError(false);
+      }
+    }
+
+    const id = setInterval(() => void poll(), POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [mergeItems]);
+
+  // ── Open SMS app for a specific item ──────────────────────────────────
+  const handleOpenSms = useCallback(async (item: SmsItem) => {
+    const info = infoRef.current;
+    if (!info) return;
+
+    // Mark as "opened" so the button changes state
+    setQueue((q) => q.map((m) => m.messageId === item.messageId ? { ...m, state: "opened" } : m));
+    openSmsApp(item.phoneNumber, item.messageText);
+
+    // After a delay, confirm to server and mark done in UI
+    await new Promise((r) => setTimeout(r, 5000));
+    await confirmMessage(info, item.messageId, "sent");
+    setQueue((q) => q.map((m) => m.messageId === item.messageId ? { ...m, state: "done" } : m));
+
+    // Clean up done items after another 3 s
+    setTimeout(() => {
+      setQueue((q) => q.filter((m) => m.messageId !== item.messageId));
+    }, 3000);
   }, []);
 
-  if (status === "invalid") {
+  // ── "Invalid link" screen ──────────────────────────────────────────────
+  if (connStatus === "invalid") {
     return (
       <div className="min-h-screen bg-gray-950 flex items-center justify-center p-6">
         <div className="text-center text-white max-w-xs">
           <AlertTriangle className="w-16 h-16 text-red-500 mx-auto mb-4" />
           <h1 className="text-2xl font-bold mb-2">Invalid Link</h1>
           <p className="text-gray-400 text-sm">
-            This connection link is missing required parameters. Please scan the QR code again from
-            the SMS Control dashboard.
+            Scan the QR code from the SMS Control dashboard to connect this device.
           </p>
         </div>
       </div>
     );
   }
 
-  const pendingCount = smsQueue.filter((m) => m.openedAt === undefined).length;
-  const processingMsg = smsQueue.find((m) => m.messageId === processingId);
+  const pending = queue.filter((m) => m.state === "pending");
+  const opened  = queue.filter((m) => m.state === "opened");
+  const done    = queue.filter((m) => m.state === "done");
 
   return (
-    <div className="min-h-screen bg-gray-950 text-white flex flex-col items-center justify-start p-6 pt-10">
+    <div className="min-h-screen bg-gray-950 text-white flex flex-col items-center justify-start p-4 pt-8">
       {/* Brand */}
-      <div className="mb-8 text-center">
-        <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 mb-4">
-          <Smartphone className="w-9 h-9 text-white" />
+      <div className="mb-6 text-center">
+        <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-blue-600 mb-3">
+          <Smartphone className="w-8 h-8 text-white" />
         </div>
-        <h1 className="text-2xl font-bold tracking-tight">SMS Control</h1>
-        <p className="text-gray-400 text-sm mt-1">Mobile Gateway Agent</p>
+        <h1 className="text-xl font-bold">SMS Control</h1>
+        <p className="text-gray-400 text-xs mt-0.5">Mobile Gateway Agent</p>
       </div>
 
-      {/* Connection status card */}
-      <div className="w-full max-w-sm bg-gray-900 rounded-2xl border border-gray-800 p-6 mb-4">
-        <div className="flex items-center gap-3 mb-5">
-          {status === "connecting" && (
-            <>
-              <Loader2 className="w-6 h-6 text-blue-400 animate-spin" />
-              <span className="text-blue-400 font-semibold">Connecting…</span>
-            </>
-          )}
-          {status === "connected" && (
-            <>
-              <CheckCircle2 className="w-6 h-6 text-green-400" />
-              <span className="text-green-400 font-semibold">Connected & Active</span>
-            </>
-          )}
-          {status === "error" && (
-            <>
-              <WifiOff className="w-6 h-6 text-red-400" />
-              <span className="text-red-400 font-semibold">Connection Failed</span>
-            </>
-          )}
-          <div
-            className={`ml-auto w-3 h-3 rounded-full ${
-              status === "connected"
-                ? "bg-green-400 animate-pulse"
-                : status === "error"
-                  ? "bg-red-400"
-                  : "bg-yellow-400 animate-pulse"
-            }`}
-          />
+      {/* Status card */}
+      <div className="w-full max-w-sm bg-gray-900 rounded-2xl border border-gray-800 p-5 mb-3">
+        <div className="flex items-center gap-2 mb-4">
+          {connStatus === "connecting" && <><Loader2 className="w-5 h-5 text-blue-400 animate-spin" /><span className="text-blue-400 font-semibold text-sm">Connecting…</span></>}
+          {connStatus === "connected"  && <><CheckCircle2 className="w-5 h-5 text-green-400" /><span className="text-green-400 font-semibold text-sm">Connected</span></>}
+          {connStatus === "error"      && <><WifiOff className="w-5 h-5 text-red-400" /><span className="text-red-400 font-semibold text-sm">Connection error — retrying</span></>}
+          <div className={`ml-auto w-2.5 h-2.5 rounded-full ${
+            connStatus === "connected" ? "bg-green-400 animate-pulse" :
+            connStatus === "error"     ? "bg-red-400" : "bg-yellow-400 animate-pulse"
+          }`} />
         </div>
 
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-gray-400 text-sm">
-              <Battery className="w-4 h-4" />
-              <span>Battery</span>
+        <div className="grid grid-cols-2 gap-3 text-sm">
+          <div className="bg-gray-800 rounded-lg p-3">
+            <div className="flex items-center gap-1.5 text-gray-400 text-xs mb-1">
+              <Battery className="w-3.5 h-3.5" /> Battery
             </div>
-            <span className="font-mono text-sm">{battery !== null ? `${battery}%` : "—"}</span>
+            <span className="font-mono font-semibold">{battery !== null ? `${battery}%` : "—"}</span>
           </div>
 
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-gray-400 text-sm">
-              <Signal className="w-4 h-4" />
-              <span>Signal</span>
+          <div className="bg-gray-800 rounded-lg p-3">
+            <div className="flex items-center gap-1.5 text-gray-400 text-xs mb-1">
+              <Signal className="w-3.5 h-3.5" /> Signal
             </div>
-            <div className="flex gap-0.5 items-end">
-              {[1, 2, 3, 4].map((bar) => (
-                <div
-                  key={bar}
-                  className={`w-1.5 rounded-sm ${signal !== null && bar <= signal ? "bg-green-400" : "bg-gray-700"}`}
-                  style={{ height: `${bar * 4 + 4}px` }}
-                />
+            <div className="flex gap-0.5 items-end h-5">
+              {[1,2,3,4].map((b) => (
+                <div key={b} className={`w-1.5 rounded-sm ${signal !== null && b <= signal ? "bg-green-400" : "bg-gray-600"}`}
+                  style={{ height: `${b * 4 + 4}px` }} />
               ))}
             </div>
           </div>
 
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-gray-400 text-sm">
-              <Wifi className="w-4 h-4" />
-              <span>WebSocket</span>
+          <div className="bg-gray-800 rounded-lg p-3">
+            <div className="flex items-center gap-1.5 text-gray-400 text-xs mb-1">
+              <Wifi className="w-3.5 h-3.5" /> WebSocket
             </div>
-            <span
-              className={`text-xs font-mono ${wsConnected ? "text-green-400" : "text-gray-500"}`}
-            >
-              {wsConnected ? "Live" : "Reconnecting…"}
+            <span className={`text-xs font-mono font-semibold ${wsRegistered ? "text-green-400" : "text-yellow-400"}`}>
+              {wsRegistered ? "Registered" : "Connecting…"}
             </span>
           </div>
 
-          <div className="flex items-center justify-between">
-            <span className="text-gray-400 text-sm">Last heartbeat</span>
-            <span className="font-mono text-xs text-gray-300">
-              {lastPing ? lastPing.toLocaleTimeString() : "—"}
-            </span>
-          </div>
-
-          <div className="flex items-center justify-between">
-            <span className="text-gray-400 text-sm">Total pings</span>
-            <span className="font-mono text-sm text-blue-400">{pingCount}</span>
+          <div className="bg-gray-800 rounded-lg p-3">
+            <div className="flex items-center gap-1.5 text-gray-400 text-xs mb-1">
+              <RefreshCw className="w-3.5 h-3.5" /> Heartbeats
+            </div>
+            <span className="font-mono font-semibold text-blue-400">{pingCount}</span>
           </div>
         </div>
+
+        {lastPing && (
+          <p className="text-xs text-gray-600 text-center mt-3">
+            Last ping: {lastPing.toLocaleTimeString()}
+          </p>
+        )}
       </div>
 
-      {/* SMS dispatch queue */}
-      <div className="w-full max-w-sm bg-gray-900 rounded-2xl border border-gray-800 p-5 mb-4">
+      {/* SMS Queue */}
+      <div className="w-full max-w-sm bg-gray-900 rounded-2xl border border-gray-800 p-5 mb-3">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <MessageSquare className="w-4 h-4 text-blue-400" />
             <span className="font-semibold text-sm">SMS Queue</span>
           </div>
-          {smsQueue.length > 0 && (
-            <span className="text-xs font-mono bg-blue-600 text-white px-2 py-0.5 rounded-full">
-              {pendingCount} pending
+          {pending.length > 0 && (
+            <span className="text-xs font-mono bg-blue-600 px-2 py-0.5 rounded-full">
+              {pending.length} pending
             </span>
           )}
         </div>
 
-        {smsQueue.length === 0 ? (
-          <p className="text-gray-500 text-sm text-center py-4">
-            No messages queued. Start a campaign to dispatch SMS through this device.
-          </p>
+        {queue.length === 0 ? (
+          <div className="text-center py-6">
+            <MessageSquare className="w-8 h-8 text-gray-700 mx-auto mb-2" />
+            <p className="text-gray-500 text-sm">No messages — start a campaign to begin</p>
+          </div>
         ) : (
-          <div className="space-y-3">
-            {smsQueue.map((msg) => {
-              const isProcessing = msg.messageId === processingId;
-              const isDone = msg.openedAt !== undefined && !isProcessing;
-              return (
-                <div
-                  key={msg.messageId}
-                  className={`rounded-lg p-3 border text-sm transition-colors ${
-                    isProcessing
-                      ? "border-blue-500/40 bg-blue-500/10"
-                      : isDone
-                        ? "border-green-500/30 bg-green-500/5 opacity-60"
-                        : "border-gray-700 bg-gray-800"
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="font-mono text-xs text-blue-300">{msg.phoneNumber}</span>
-                    {isProcessing ? (
-                      <span className="flex items-center gap-1 text-blue-400 text-xs">
-                        <Loader2 className="w-3 h-3 animate-spin" /> Opening SMS…
-                      </span>
-                    ) : isDone ? (
-                      <span className="flex items-center gap-1 text-green-400 text-xs">
-                        <CheckCircle2 className="w-3 h-3" /> Sent
-                      </span>
-                    ) : (
-                      <span className="flex items-center gap-1 text-gray-400 text-xs">
-                        <Send className="w-3 h-3" /> Queued
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-gray-300 text-xs line-clamp-2">{msg.messageText}</p>
+          <div className="space-y-2.5">
+            {/* Pending — actionable */}
+            {pending.map((msg) => (
+              <div key={msg.messageId} className="rounded-xl p-3.5 border border-gray-700 bg-gray-800">
+                <div className="flex items-start justify-between gap-2 mb-2">
+                  <span className="font-mono text-blue-300 text-xs">{msg.phoneNumber}</span>
+                  <span className="text-gray-500 text-xs shrink-0">#{msg.messageId}</span>
                 </div>
-              );
-            })}
+                <p className="text-gray-300 text-xs mb-3 leading-relaxed line-clamp-3">{msg.messageText}</p>
+                <button
+                  onClick={() => void handleOpenSms(msg)}
+                  className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white text-sm font-semibold py-2 px-4 rounded-lg transition-colors"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                  Open SMS App
+                </button>
+              </div>
+            ))}
+
+            {/* Opened — confirming */}
+            {opened.map((msg) => (
+              <div key={msg.messageId} className="rounded-xl p-3.5 border border-blue-500/30 bg-blue-500/10">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="font-mono text-blue-300 text-xs">{msg.phoneNumber}</span>
+                  <span className="flex items-center gap-1 text-blue-400 text-xs">
+                    <Loader2 className="w-3 h-3 animate-spin" /> Confirming…
+                  </span>
+                </div>
+                <p className="text-gray-400 text-xs line-clamp-2">{msg.messageText}</p>
+              </div>
+            ))}
+
+            {/* Done */}
+            {done.map((msg) => (
+              <div key={msg.messageId} className="rounded-xl p-3.5 border border-green-500/20 bg-green-500/5 opacity-60">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="font-mono text-gray-400 text-xs">{msg.phoneNumber}</span>
+                  <span className="flex items-center gap-1 text-green-400 text-xs">
+                    <CheckCircle2 className="w-3 h-3" /> Sent
+                  </span>
+                </div>
+                <p className="text-gray-500 text-xs line-clamp-1">{msg.messageText}</p>
+              </div>
+            ))}
           </div>
         )}
       </div>
 
       {/* Instructions */}
-      <div className="w-full max-w-sm bg-gray-900 rounded-2xl border border-gray-800 p-5 text-sm text-gray-400">
-        <p className="font-semibold text-gray-200 mb-2">Keep this page open</p>
-        <p>
-          When campaigns run, messages will appear above and your phone's SMS app will open
-          automatically for each one. Tap <strong className="text-white">Send</strong> in the SMS
-          app, then return here for the next message.
-        </p>
-        <div className="mt-3 text-xs text-gray-600">
-          Heartbeat every {HEARTBEAT_INTERVAL_MS / 1000}s · Device ID #
-          {infoRef.current?.deviceId ?? "—"}
+      <div className="w-full max-w-sm bg-gray-900 rounded-2xl border border-gray-800 p-5 text-sm text-gray-400 mb-4">
+        <p className="font-semibold text-gray-200 mb-2 text-sm">How this works</p>
+        <ol className="space-y-1.5 text-xs list-decimal list-inside text-gray-400">
+          <li>Start a campaign from the dashboard</li>
+          <li>Messages appear above in the queue</li>
+          <li>Tap <strong className="text-white">Open SMS App</strong> for each message</li>
+          <li>Your phone's SMS app opens with the number &amp; text pre-filled</li>
+          <li>Tap <strong className="text-white">Send</strong> then come back here</li>
+        </ol>
+        <div className="mt-3 pt-3 border-t border-gray-800 text-xs text-gray-600 flex justify-between">
+          <span>Device #{infoRef.current?.deviceId ?? "—"}</span>
+          <span>Polls every {POLL_INTERVAL_MS / 1000}s</span>
         </div>
       </div>
     </div>

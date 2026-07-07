@@ -1,0 +1,1 @@
+- [SMS Dispatch Architecture](sms-dispatch-architecture.md) — queued→dispatched→sent state machine; WS fast path + HTTP polling fallback; atomic claiming prevents race conditions.

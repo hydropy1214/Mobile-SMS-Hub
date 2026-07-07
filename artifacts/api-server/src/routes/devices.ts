@@ -1,6 +1,6 @@
 import { Router } from "express";
-import { eq } from "drizzle-orm";
-import { db, devicesTable, activityLogTable } from "@workspace/db";
+import { eq, and, inArray } from "drizzle-orm";
+import { db, devicesTable, activityLogTable, messagesTable } from "@workspace/db";
 import {
   CreateDeviceBody,
   DeviceHeartbeatBody,
@@ -125,6 +125,49 @@ router.patch("/devices/:id/heartbeat", async (req, res) => {
   });
 
   res.json(safeDevice(device));
+});
+
+/**
+ * Returns queued messages assigned to this device.
+ * Called by the mobile page every few seconds as a reliable polling fallback
+ * in case the WebSocket push was missed.
+ * Requires the device token via Authorization header OR ?token= query param.
+ */
+router.get("/devices/:id/pending-messages", async (req, res) => {
+  const id = Number(req.params.id);
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid device id" }); return; }
+
+  // Bearer header only — no query-param token (logs/referrer exposure risk)
+  const providedToken = req.headers.authorization?.replace(/^Bearer\s+/i, "");
+
+  const [device] = await db
+    .select({ token: devicesTable.token })
+    .from(devicesTable)
+    .where(eq(devicesTable.id, id));
+
+  if (!device || !providedToken || device.token !== providedToken) {
+    res.status(401).json({ error: "Unauthorized" }); return;
+  }
+
+  // Return both "queued" (not yet dispatched via WS) and "dispatched"
+  // (WS push attempted, awaiting device confirmation) so the mobile page
+  // polling fallback can recover messages that were missed after a reconnect.
+  const pending = await db
+    .select()
+    .from(messagesTable)
+    .where(and(
+      eq(messagesTable.deviceId, id),
+      inArray(messagesTable.status, ["queued", "dispatched"]),
+    ));
+
+  res.json(pending.map((m) => ({
+    id: m.id,
+    campaignId: m.campaignId,
+    phoneNumber: m.phoneNumber,
+    messageText: m.messageText,
+    status: m.status,
+    createdAt: m.createdAt.toISOString(),
+  })));
 });
 
 /**
