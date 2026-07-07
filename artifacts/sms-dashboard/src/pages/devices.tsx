@@ -58,11 +58,17 @@ import {
   SignalMedium, 
   SignalLow,
   QrCode,
-  AlertTriangle
+  AlertTriangle,
+  Terminal,
+  Copy,
+  Check,
+  Zap
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
 import { QRCodeSVG } from "qrcode.react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { ScrollArea } from "@/components/ui/scroll-area";
 
 const formSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
@@ -305,6 +311,85 @@ export default function Devices() {
   );
 }
 
+function buildTermuxScript(serverOrigin: string, token: string): string {
+  return `#!/data/data/com.termux/files/usr/bin/bash
+# ─────────────────────────────────────────────────────────
+#  SMS Control — Termux Auto-Send Daemon
+#  Sends SMS automatically via your SIM — no tap needed.
+#  Requirements: Termux + Termux:API app + jq
+#    pkg install termux-api jq
+#    termux-setup-storage  (grant SMS permission when asked)
+# ─────────────────────────────────────────────────────────
+
+SERVER="${serverOrigin}"
+TOKEN="${token}"
+POLL_INTERVAL=4   # seconds between polls
+
+echo "🚀 SMS Gateway daemon started"
+echo "   Server : \$SERVER"
+echo "   Press Ctrl+C to stop"
+echo ""
+
+while true; do
+  RESPONSE=\$(curl -sf \\
+    -H "Authorization: Bearer \$TOKEN" \\
+    "\$SERVER/api/native/v1/messages" 2>/dev/null)
+
+  if [ \$? -ne 0 ]; then
+    echo "\$(date '+%H:%M:%S') ⚠ Server unreachable — retrying in \${POLL_INTERVAL}s"
+    sleep \$POLL_INTERVAL
+    continue
+  fi
+
+  COUNT=\$(echo "\$RESPONSE" | jq 'length' 2>/dev/null || echo 0)
+
+  if [ "\$COUNT" -gt 0 ]; then
+    echo "\$(date '+%H:%M:%S') 📨 \$COUNT message(s) to send"
+
+    echo "\$RESPONSE" | jq -c '.[]' | while read -r msg; do
+      ID=\$(echo "\$msg" | jq -r '.id')
+      PHONE=\$(echo "\$msg" | jq -r '.phoneNumber')
+      TEXT=\$(echo "\$msg" | jq -r '.messageText')
+
+      echo "\$(date '+%H:%M:%S') → Sending to \$PHONE …"
+
+      if termux-sms-send -n "\$PHONE" "\$TEXT" 2>/dev/null; then
+        STATUS="sent"
+        echo "\$(date '+%H:%M:%S') ✓ Sent   #\$ID → \$PHONE"
+      else
+        STATUS="failed"
+        echo "\$(date '+%H:%M:%S') ✗ Failed #\$ID → \$PHONE"
+      fi
+
+      curl -sf -X PATCH \\
+        -H "Authorization: Bearer \$TOKEN" \\
+        -H "Content-Type: application/json" \\
+        -d "{\\"status\\":\\"\$STATUS\\"}" \\
+        "\$SERVER/api/native/v1/messages/\$ID" > /dev/null 2>&1
+
+      sleep 2
+    done
+  fi
+
+  sleep \$POLL_INTERVAL
+done`;
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  function copy() {
+    void navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }
+  return (
+    <Button variant="outline" size="sm" onClick={copy} className="gap-1.5 shrink-0">
+      {copied ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+      {copied ? "Copied!" : "Copy"}
+    </Button>
+  );
+}
+
 function ConnectDialog({ deviceId, onClose }: { deviceId: number | null, onClose: () => void }) {
   const { data: connectInfo, isLoading } = useGetDeviceConnect(
     deviceId as number,
@@ -316,45 +401,121 @@ function ConnectDialog({ deviceId, onClose }: { deviceId: number | null, onClose
     }
   );
 
+  const serverOrigin = typeof window !== "undefined"
+    ? window.location.origin
+    : "";
+
+  const termuxScript = connectInfo
+    ? buildTermuxScript(serverOrigin, connectInfo.token)
+    : "";
+
   return (
     <Dialog open={!!deviceId} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Connect Device</DialogTitle>
           <DialogDescription>
-            Scan this QR code with the SMS Gateway Android app to securely link this device to your dashboard.
+            Choose how to connect this device as an SMS gateway.
           </DialogDescription>
         </DialogHeader>
-        
-        <div className="flex flex-col items-center justify-center py-6">
-          {isLoading ? (
-            <Skeleton className="w-48 h-48 rounded-md" />
-          ) : connectInfo ? (
-            <div className="space-y-6 flex flex-col items-center w-full">
-              <div className="bg-white p-4 rounded-xl border shadow-sm">
-                <QRCodeSVG
-                  value={connectInfo.qrData}
-                  size={200}
-                  level="H"
-                  includeMargin={false}
-                />
+
+        {isLoading ? (
+          <div className="py-8 flex justify-center"><Skeleton className="w-48 h-48 rounded-md" /></div>
+        ) : connectInfo ? (
+          <Tabs defaultValue="termux">
+            <TabsList className="w-full">
+              <TabsTrigger value="termux" className="flex-1 gap-2">
+                <Zap className="w-3.5 h-3.5" />
+                Auto-Send (Termux)
+              </TabsTrigger>
+              <TabsTrigger value="browser" className="flex-1 gap-2">
+                <QrCode className="w-3.5 h-3.5" />
+                Browser (manual tap)
+              </TabsTrigger>
+            </TabsList>
+
+            {/* ── Termux tab ─────────────────────────────────── */}
+            <TabsContent value="termux" className="space-y-4 mt-4">
+              <div className="rounded-lg border bg-amber-500/5 border-amber-500/20 p-3 text-sm text-amber-700 dark:text-amber-400 space-y-1">
+                <p className="font-semibold">Sends SMS automatically — no tap needed!</p>
+                <p className="text-xs opacity-80">Uses Termux (free Android terminal) to call your SIM directly.</p>
               </div>
-              
-              <div className="w-full space-y-2">
-                <label className="text-sm font-medium">Manual Connection URL</label>
-                <div className="flex gap-2">
-                  <Input readOnly value={connectInfo.connectUrl} className="font-mono text-xs bg-muted" />
+
+              <div className="space-y-2">
+                <p className="text-sm font-semibold">Step 1 — Install on your Android phone:</p>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="rounded-md border bg-muted/50 p-2.5 space-y-0.5">
+                    <p className="font-mono font-semibold">Termux</p>
+                    <p className="text-muted-foreground">Install from F-Droid or Play Store</p>
+                  </div>
+                  <div className="rounded-md border bg-muted/50 p-2.5 space-y-0.5">
+                    <p className="font-mono font-semibold">Termux:API</p>
+                    <p className="text-muted-foreground">Install the companion API app</p>
+                  </div>
                 </div>
               </div>
-            </div>
-          ) : (
-            <div className="flex flex-col items-center text-destructive">
-              <AlertTriangle className="w-12 h-12 mb-2 opacity-50" />
-              <p>Failed to load connection data</p>
-            </div>
-          )}
-        </div>
-        
+
+              <div className="space-y-2">
+                <p className="text-sm font-semibold">Step 2 — Run this once in Termux:</p>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 rounded-md bg-muted px-3 py-2 font-mono text-xs">
+                    pkg install termux-api jq -y
+                  </code>
+                  <CopyButton text="pkg install termux-api jq -y" />
+                </div>
+                <p className="text-xs text-muted-foreground">When prompted, grant SMS permission to Termux:API.</p>
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-sm font-semibold">Step 3 — Save and run the daemon script:</p>
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <code className="flex-1 rounded-md bg-muted px-3 py-2 font-mono text-xs">
+                      curl -o sms-daemon.sh '{serverOrigin}/api/native/v1/daemon/{connectInfo.token}' && bash sms-daemon.sh
+                    </code>
+                    <CopyButton text={`curl -o sms-daemon.sh '${serverOrigin}/api/native/v1/daemon/${connectInfo.token}' && bash sms-daemon.sh`} />
+                  </div>
+                  <p className="text-xs text-muted-foreground">Or copy the full script manually:</p>
+                  <div className="relative">
+                    <ScrollArea className="h-40 rounded-md border bg-zinc-950">
+                      <pre className="p-3 text-[10px] font-mono text-zinc-300 leading-relaxed whitespace-pre">{termuxScript}</pre>
+                    </ScrollArea>
+                    <div className="absolute top-2 right-2">
+                      <CopyButton text={termuxScript} />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
+                <p>The daemon runs continuously, polling the server every 4 seconds. Keep Termux open (or use a session manager like <span className="font-mono">tmux</span>) to keep it running in the background.</p>
+              </div>
+            </TabsContent>
+
+            {/* ── Browser tab ────────────────────────────────── */}
+            <TabsContent value="browser" className="space-y-4 mt-4">
+              <div className="flex flex-col items-center space-y-4">
+                <div className="bg-white p-4 rounded-xl border shadow-sm">
+                  <QRCodeSVG value={connectInfo.qrData} size={180} level="H" includeMargin={false} />
+                </div>
+                <div className="w-full space-y-1.5">
+                  <label className="text-sm font-medium">Connection URL</label>
+                  <div className="flex gap-2">
+                    <Input readOnly value={connectInfo.connectUrl} className="font-mono text-xs bg-muted" />
+                    <CopyButton text={connectInfo.connectUrl} />
+                  </div>
+                  <p className="text-xs text-muted-foreground">Open this URL on your phone's browser. You'll need to tap <strong>Send</strong> in the SMS app each time.</p>
+                </div>
+              </div>
+            </TabsContent>
+          </Tabs>
+        ) : (
+          <div className="flex flex-col items-center text-destructive py-8">
+            <AlertTriangle className="w-12 h-12 mb-2 opacity-50" />
+            <p>Failed to load connection data</p>
+          </div>
+        )}
+
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Close</Button>
         </DialogFooter>

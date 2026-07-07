@@ -6,6 +6,7 @@ import contactListsRouter from "./contact_lists";
 import campaignsRouter from "./campaigns";
 import messagesRouter from "./messages";
 import dashboardRouter from "./dashboard";
+import nativeGatewayRouter from "./native-gateway";
 
 const router: IRouter = Router();
 
@@ -16,5 +17,6 @@ router.use(contactListsRouter);
 router.use(campaignsRouter);
 router.use(messagesRouter);
 router.use(dashboardRouter);
+router.use(nativeGatewayRouter);
 
 export default router;
