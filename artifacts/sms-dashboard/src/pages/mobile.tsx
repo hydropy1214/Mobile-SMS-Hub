@@ -134,7 +134,10 @@ function getWsUrl() {
 function openSmsApp(phone: string, body: string): boolean {
   try {
     const a = document.createElement("a");
-    a.href = `sms:${encodeURIComponent(phone)}?body=${encodeURIComponent(body)}`;
+    // Do NOT percent-encode the phone number — the sms: scheme treats it as
+    // a diallable string. encodeURIComponent turns "+" into "%2B" which some
+    // Android SMS apps pass literally to the dialler and fail to resolve.
+    a.href = `sms:${phone}?body=${encodeURIComponent(body)}`;
     a.rel = "noopener noreferrer";
     document.body.appendChild(a);
     a.click();

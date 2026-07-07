@@ -19,5 +19,10 @@ export interface Device {
   /** @nullable */
   lastSeen?: string | null;
   token: string;
+  /**
+     * 0 = SIM 1, 1 = SIM 2, null = device default
+     * @nullable
+     */
+  simSlot?: number | null;
   createdAt: string;
 }

@@ -11,6 +11,8 @@ export const devicesTable = pgTable("devices", {
   signalStrength: integer("signal_strength"),
   lastSeen: timestamp("last_seen"),
   token: text("token").notNull().unique(),
+  /** 0 = SIM 1, 1 = SIM 2, null = use device default */
+  simSlot: integer("sim_slot"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 

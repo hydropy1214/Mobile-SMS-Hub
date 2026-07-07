@@ -9,8 +9,10 @@ export const messagesTable = pgTable("messages", {
   deviceId: integer("device_id"),
   phoneNumber: text("phone_number").notNull(),
   messageText: text("message_text"),
-  status: text("status").notNull().default("queued"), // queued | sent | failed | delivered
+  status: text("status").notNull().default("queued"), // queued | dispatched | sent | failed | delivered
   sentAt: timestamp("sent_at"),
+  /** Set when message transitions from queued→dispatched; used for stuck-dispatch timeout */
+  dispatchedAt: timestamp("dispatched_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 

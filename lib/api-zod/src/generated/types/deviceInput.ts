@@ -9,4 +9,9 @@
 export interface DeviceInput {
   name: string;
   phoneNumber: string;
+  /**
+     * 0 = SIM 1, 1 = SIM 2, null = device default
+     * @nullable
+     */
+  simSlot?: number | null;
 }

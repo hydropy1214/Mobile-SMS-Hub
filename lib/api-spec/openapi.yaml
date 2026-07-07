@@ -553,6 +553,9 @@ components:
           type: ["string", "null"]
         token:
           type: string
+        simSlot:
+          type: ["integer", "null"]
+          description: "0 = SIM 1, 1 = SIM 2, null = device default"
         createdAt:
           type: string
 
@@ -564,6 +567,9 @@ components:
           type: string
         phoneNumber:
           type: string
+        simSlot:
+          type: ["integer", "null"]
+          description: "0 = SIM 1, 1 = SIM 2, null = device default"
 
     DeviceHeartbeat:
       type: object

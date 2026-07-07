@@ -62,8 +62,16 @@ import {
   Terminal,
   Copy,
   Check,
-  Zap
+  Zap,
+  CreditCard
 } from "lucide-react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { formatDistanceToNow } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
 import { QRCodeSVG } from "qrcode.react";
@@ -72,7 +80,8 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 
 const formSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
-  phoneNumber: z.string().min(5, "Phone number is required")
+  phoneNumber: z.string().min(5, "Phone number is required"),
+  simSlot: z.enum(["default", "0", "1"]).optional(),
 });
 
 export default function Devices() {
@@ -104,12 +113,14 @@ export default function Devices() {
     resolver: zodResolver(formSchema),
     defaultValues: {
       name: "",
-      phoneNumber: ""
+      phoneNumber: "",
+      simSlot: "default",
     }
   });
 
   function onSubmit(values: z.infer<typeof formSchema>) {
-    createDevice.mutate({ data: values }, {
+    const simSlot = values.simSlot === "0" ? 0 : values.simSlot === "1" ? 1 : null;
+    createDevice.mutate({ data: { name: values.name, phoneNumber: values.phoneNumber, simSlot } }, {
       onSuccess: (newDevice) => {
         queryClient.invalidateQueries({ queryKey: getListDevicesQueryKey() });
         setCreateDialogOpen(false);
@@ -184,8 +195,33 @@ export default function Devices() {
                     <FormItem>
                       <FormLabel>Phone Number</FormLabel>
                       <FormControl>
-                        <Input placeholder="+1234567890" {...field} />
+                        <Input placeholder="+917207860240" {...field} />
                       </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="simSlot"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel className="flex items-center gap-1.5">
+                        <CreditCard className="w-3.5 h-3.5" />
+                        SIM Card (for dual-SIM phones)
+                      </FormLabel>
+                      <Select onValueChange={field.onChange} defaultValue={field.value}>
+                        <FormControl>
+                          <SelectTrigger>
+                            <SelectValue placeholder="Use device default SIM" />
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          <SelectItem value="default">Use device default SIM</SelectItem>
+                          <SelectItem value="0">SIM 1 — slot 0</SelectItem>
+                          <SelectItem value="1">SIM 2 — slot 1</SelectItem>
+                        </SelectContent>
+                      </Select>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -206,8 +242,9 @@ export default function Devices() {
           <Table>
             <TableHeader>
               <TableRow className="bg-muted/50">
-                <TableHead className="w-[300px]">Device</TableHead>
+                <TableHead className="w-[280px]">Device</TableHead>
                 <TableHead>Status</TableHead>
+                <TableHead>SIM</TableHead>
                 <TableHead>Battery & Signal</TableHead>
                 <TableHead>Last Seen</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
@@ -219,6 +256,7 @@ export default function Devices() {
                   <TableRow key={i}>
                     <TableCell><Skeleton className="h-6 w-48" /></TableCell>
                     <TableCell><Skeleton className="h-6 w-20" /></TableCell>
+                    <TableCell><Skeleton className="h-6 w-16" /></TableCell>
                     <TableCell><Skeleton className="h-6 w-32" /></TableCell>
                     <TableCell><Skeleton className="h-6 w-24" /></TableCell>
                     <TableCell><Skeleton className="h-8 w-8 ml-auto" /></TableCell>
@@ -240,6 +278,16 @@ export default function Devices() {
                     </TableCell>
                     <TableCell>
                       <DeviceStatusBadge status={device.status} />
+                    </TableCell>
+                    <TableCell>
+                      {(device as unknown as { simSlot?: number | null }).simSlot != null ? (
+                        <span className="inline-flex items-center gap-1 text-xs font-mono font-semibold bg-blue-500/10 text-blue-600 border border-blue-500/20 px-2 py-0.5 rounded-md">
+                          <CreditCard className="w-3 h-3" />
+                          SIM {((device as unknown as { simSlot: number }).simSlot) + 1}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">default</span>
+                      )}
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-4 text-muted-foreground">
@@ -311,7 +359,11 @@ export default function Devices() {
   );
 }
 
-function buildTermuxScript(serverOrigin: string, token: string): string {
+function buildTermuxScript(serverOrigin: string, token: string, simSlot?: number | null): string {
+  const simLine = simSlot != null
+    ? `SIM_SLOT=${simSlot}   # 0=SIM1 1=SIM2 — change to override`
+    : `SIM_SLOT=""         # empty = use device default SIM`;
+
   return `#!/data/data/com.termux/files/usr/bin/bash
 # ─────────────────────────────────────────────────────────
 #  SMS Control — Termux Auto-Send Daemon
@@ -324,9 +376,11 @@ function buildTermuxScript(serverOrigin: string, token: string): string {
 SERVER="${serverOrigin}"
 TOKEN="${token}"
 POLL_INTERVAL=4   # seconds between polls
+${simLine}
 
 echo "🚀 SMS Gateway daemon started"
 echo "   Server : \$SERVER"
+echo "   SIM    : \${SIM_SLOT:-default}"
 echo "   Press Ctrl+C to stop"
 echo ""
 
@@ -350,15 +404,26 @@ while true; do
       ID=\$(echo "\$msg" | jq -r '.id')
       PHONE=\$(echo "\$msg" | jq -r '.phoneNumber')
       TEXT=\$(echo "\$msg" | jq -r '.messageText')
+      MSG_SIM=\$(echo "\$msg" | jq -r '.simSlot // empty')
+      ACTIVE_SIM=\${MSG_SIM:-\$SIM_SLOT}
 
-      echo "\$(date '+%H:%M:%S') → Sending to \$PHONE …"
+      echo "\$(date '+%H:%M:%S') → Sending to \$PHONE (SIM: \${ACTIVE_SIM:-default}) …"
 
-      if termux-sms-send -n "\$PHONE" "\$TEXT" 2>/dev/null; then
+      SEND_ERR=\$(mktemp)
+      if [ -n "\$ACTIVE_SIM" ]; then
+        termux-sms-send -s "\$ACTIVE_SIM" -n "\$PHONE" "\$TEXT" 2>"\$SEND_ERR"
+      else
+        termux-sms-send -n "\$PHONE" "\$TEXT" 2>"\$SEND_ERR"
+      fi
+      SEND_EXIT=\$?
+      rm -f "\$SEND_ERR"
+
+      if [ \$SEND_EXIT -eq 0 ]; then
         STATUS="sent"
         echo "\$(date '+%H:%M:%S') ✓ Sent   #\$ID → \$PHONE"
       else
         STATUS="failed"
-        echo "\$(date '+%H:%M:%S') ✗ Failed #\$ID → \$PHONE"
+        echo "\$(date '+%H:%M:%S') ✗ Failed #\$ID → \$PHONE (exit \$SEND_EXIT)"
       fi
 
       curl -sf -X PATCH \\
@@ -405,8 +470,11 @@ function ConnectDialog({ deviceId, onClose }: { deviceId: number | null, onClose
     ? window.location.origin
     : "";
 
+  const { data: deviceDetail } = useListDevices({ query: { enabled: !!deviceId, queryKey: ['device-detail', deviceId] } });
+  const currentDevice = deviceDetail?.find(d => d.id === deviceId);
+
   const termuxScript = connectInfo
-    ? buildTermuxScript(serverOrigin, connectInfo.token)
+    ? buildTermuxScript(serverOrigin, connectInfo.token, currentDevice?.simSlot)
     : "";
 
   return (

@@ -214,6 +214,12 @@ function MessageStatusBadge({ status }: { status: string }) {
           <XCircle className="w-3 h-3" /> Failed
         </Badge>
       );
+    case 'dispatched':
+      return (
+        <Badge variant="outline" className="bg-blue-500/10 text-blue-600 border-blue-500/20 font-mono gap-1">
+          <Clock className="w-3 h-3" /> Sending
+        </Badge>
+      );
     case 'queued':
     default:
       return (

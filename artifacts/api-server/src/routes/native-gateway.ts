@@ -82,6 +82,7 @@ router.get("/native/v1/messages", async (req, res) => {
       id: m.id,
       phoneNumber: m.phoneNumber,
       messageText: m.messageText,
+      simSlot: device.simSlot ?? null,
     })),
   );
 });
@@ -126,10 +127,9 @@ router.patch("/native/v1/messages/:id", async (req, res) => {
     .returning();
 
   // Recalculate campaign counters and check for completion
-  const [campaign] = await db
-    .select()
-    .from(campaignsTable)
-    .where(eq(campaignsTable.id, msg.campaignId));
+  const [campaign] = msg.campaignId
+    ? await db.select().from(campaignsTable).where(eq(campaignsTable.id, msg.campaignId))
+    : [];
 
   if (campaign && campaign.status === "sending") {
     const newSentCount   = status === "sent"   ? campaign.sentCount   + 1 : campaign.sentCount;
@@ -224,6 +224,20 @@ router.get("/native/v1/daemon/:token", async (req, res) => {
   const host  = replitDomain ?? (req.headers.host ?? "localhost");
   const serverOrigin = `${proto}://${host}`;
 
+  // Fetch the device's simSlot so we can embed it in the script
+  const [deviceRow] = await db
+    .select({ simSlot: devicesTable.simSlot })
+    .from(devicesTable)
+    .where(eq(devicesTable.token, token));
+
+  const simSlotLine = (deviceRow?.simSlot != null)
+    ? `SIM_SLOT=${deviceRow.simSlot}   # 0=SIM1 1=SIM2 — change to override`
+    : `SIM_SLOT=""         # empty = use device default SIM`;
+
+  const sendCmd = (deviceRow?.simSlot != null)
+    ? `termux-sms-send -s $SIM_SLOT -n "$PHONE" "$TEXT"`
+    : `termux-sms-send -n "$PHONE" "$TEXT"`;
+
   const script = `#!/data/data/com.termux/files/usr/bin/bash
 # ─────────────────────────────────────────────────────────
 #  SMS Control — Termux Auto-Send Daemon
@@ -237,9 +251,11 @@ router.get("/native/v1/daemon/:token", async (req, res) => {
 SERVER="${serverOrigin}"
 TOKEN="${token}"
 POLL_INTERVAL=4   # seconds between polls
+${simSlotLine}
 
 echo "🚀 SMS Gateway daemon started"
 echo "   Server : $SERVER"
+echo "   SIM    : \${SIM_SLOT:-default}"
 echo "   Press Ctrl+C to stop"
 echo ""
 
@@ -263,15 +279,27 @@ while true; do
       ID=$(echo "$msg" | jq -r '.id')
       PHONE=$(echo "$msg" | jq -r '.phoneNumber')
       TEXT=$(echo "$msg" | jq -r '.messageText')
+      # Use per-message simSlot if server provided one, otherwise fall back to script default
+      MSG_SIM=$(echo "$msg" | jq -r '.simSlot // empty')
+      ACTIVE_SIM=\${MSG_SIM:-\$SIM_SLOT}
 
-      echo "$(date '+%H:%M:%S') → Sending to $PHONE …"
+      echo "$(date '+%H:%M:%S') → Sending to $PHONE (SIM: \${ACTIVE_SIM:-default}) …"
 
-      if termux-sms-send -n "$PHONE" "$TEXT" 2>/dev/null; then
+      SEND_ERR=$(mktemp)
+      if [ -n "\$ACTIVE_SIM" ]; then
+        termux-sms-send -s "\$ACTIVE_SIM" -n "$PHONE" "$TEXT" 2>"\$SEND_ERR"
+      else
+        termux-sms-send -n "$PHONE" "$TEXT" 2>"\$SEND_ERR"
+      fi
+      SEND_EXIT=$?
+      rm -f "\$SEND_ERR"
+
+      if [ $SEND_EXIT -eq 0 ]; then
         STATUS="sent"
         echo "$(date '+%H:%M:%S') ✓ Sent   #$ID → $PHONE"
       else
         STATUS="failed"
-        echo "$(date '+%H:%M:%S') ✗ Failed #$ID → $PHONE"
+        echo "$(date '+%H:%M:%S') ✗ Failed #$ID → $PHONE (exit \$SEND_EXIT)"
       fi
 
       curl -sf -X PATCH \\

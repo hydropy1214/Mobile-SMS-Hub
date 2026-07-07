@@ -28,6 +28,7 @@ export const ListDevicesResponseItem = zod.object({
   "signalStrength": zod.number().nullish(),
   "lastSeen": zod.string().nullish(),
   "token": zod.string(),
+  "simSlot": zod.number().nullish().describe('0 = SIM 1, 1 = SIM 2, null = device default'),
   "createdAt": zod.string()
 })
 export const ListDevicesResponse = zod.array(ListDevicesResponseItem)
@@ -38,7 +39,8 @@ export const ListDevicesResponse = zod.array(ListDevicesResponseItem)
  */
 export const CreateDeviceBody = zod.object({
   "name": zod.string(),
-  "phoneNumber": zod.string()
+  "phoneNumber": zod.string(),
+  "simSlot": zod.number().nullish().describe('0 = SIM 1, 1 = SIM 2, null = device default')
 })
 
 export const CreateDeviceResponse = zod.object({
@@ -50,6 +52,7 @@ export const CreateDeviceResponse = zod.object({
   "signalStrength": zod.number().nullish(),
   "lastSeen": zod.string().nullish(),
   "token": zod.string(),
+  "simSlot": zod.number().nullish().describe('0 = SIM 1, 1 = SIM 2, null = device default'),
   "createdAt": zod.string()
 })
 
@@ -70,6 +73,7 @@ export const GetDeviceResponse = zod.object({
   "signalStrength": zod.number().nullish(),
   "lastSeen": zod.string().nullish(),
   "token": zod.string(),
+  "simSlot": zod.number().nullish().describe('0 = SIM 1, 1 = SIM 2, null = device default'),
   "createdAt": zod.string()
 })
 
@@ -106,6 +110,7 @@ export const DeviceHeartbeatResponse = zod.object({
   "signalStrength": zod.number().nullish(),
   "lastSeen": zod.string().nullish(),
   "token": zod.string(),
+  "simSlot": zod.number().nullish().describe('0 = SIM 1, 1 = SIM 2, null = device default'),
   "createdAt": zod.string()
 })
 

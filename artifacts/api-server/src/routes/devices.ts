@@ -25,6 +25,7 @@ function safeDevice(d: typeof devicesTable.$inferSelect) {
     signalStrength: d.signalStrength ?? null,
     lastSeen: d.lastSeen?.toISOString() ?? null,
     token: "[hidden]",
+    simSlot: d.simSlot ?? null,
     createdAt: d.createdAt.toISOString(),
   };
 }
@@ -37,9 +38,12 @@ router.get("/devices", async (_req, res) => {
 router.post("/devices", async (req, res) => {
   const body = CreateDeviceBody.parse(req.body);
   const token = randomBytes(24).toString("hex");
+  // Enforce only valid SIM slot values (0=SIM1, 1=SIM2, null=default)
+  const rawSlot = typeof body.simSlot === "number" ? body.simSlot : null;
+  const simSlot = rawSlot === 0 || rawSlot === 1 ? rawSlot : null;
   const [device] = await db
     .insert(devicesTable)
-    .values({ name: body.name, phoneNumber: body.phoneNumber, token, status: "offline" })
+    .values({ name: body.name, phoneNumber: body.phoneNumber, token, status: "offline", simSlot })
     .returning();
 
   await db.insert(activityLogTable).values({

@@ -1,4 +1,4 @@
-import { eq, and, inArray } from "drizzle-orm";
+import { eq, and, inArray, lt, sql } from "drizzle-orm";
 import {
   db,
   campaignsTable,
@@ -82,7 +82,7 @@ async function processCampaign(campaign: typeof campaignsTable.$inferSelect) {
   const ids = candidates.map((c) => c.id);
   const claimed = await db
     .update(messagesTable)
-    .set({ status: "dispatched" })
+    .set({ status: "dispatched", dispatchedAt: new Date() })
     .where(and(inArray(messagesTable.id, ids), eq(messagesTable.status, "queued")))
     .returning();
 
@@ -176,6 +176,17 @@ async function processCampaign(campaign: typeof campaignsTable.$inferSelect) {
 
 async function tick() {
   try {
+    // Revert messages stuck in "dispatched" for >2 min back to "queued" so
+    // the polling fallback can pick them up again (handles WS mid-dispatch drops).
+    // Use dispatchedAt (set at transition time) not createdAt (could be much older).
+    await db
+      .update(messagesTable)
+      .set({ status: "queued" })
+      .where(and(
+        eq(messagesTable.status, "dispatched"),
+        lt(messagesTable.dispatchedAt, new Date(Date.now() - 2 * 60 * 1000)),
+      ));
+
     const sending = await db.select().from(campaignsTable).where(eq(campaignsTable.status, "sending"));
     for (const campaign of sending) {
       await processCampaign(campaign);
