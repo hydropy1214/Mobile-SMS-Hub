@@ -285,14 +285,20 @@ while true; do
 
       echo "$(date '+%H:%M:%S') → Sending to $PHONE (SIM: \${ACTIVE_SIM:-default}) …"
 
+      SEND_OUT=$(mktemp)
       SEND_ERR=$(mktemp)
       if [ -n "\$ACTIVE_SIM" ]; then
-        termux-sms-send -s "\$ACTIVE_SIM" -n "$PHONE" "$TEXT" 2>"\$SEND_ERR"
+        termux-sms-send -s "\$ACTIVE_SIM" -n "$PHONE" "$TEXT" >"\$SEND_OUT" 2>"\$SEND_ERR"
       else
-        termux-sms-send -n "$PHONE" "$TEXT" 2>"\$SEND_ERR"
+        termux-sms-send -n "$PHONE" "$TEXT" >"\$SEND_OUT" 2>"\$SEND_ERR"
       fi
       SEND_EXIT=$?
-      rm -f "\$SEND_ERR"
+      # Detect Google Play stub: exits 0 but prints "not yet available" to stdout
+      if grep -qi "not yet available" "\$SEND_OUT" 2>/dev/null; then
+        SEND_EXIT=1
+        echo "$(date '+%H:%M:%S') ✗ Termux:API not installed — install Termux + Termux:API from F-Droid (f-droid.org)"
+      fi
+      rm -f "\$SEND_OUT" "\$SEND_ERR"
 
       if [ $SEND_EXIT -eq 0 ]; then
         STATUS="sent"
