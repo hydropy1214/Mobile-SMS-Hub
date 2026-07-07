@@ -12,6 +12,7 @@ import Campaigns from "@/pages/campaigns";
 import CampaignDetail from "@/pages/campaign-detail";
 import Messages from "@/pages/messages";
 import MobilePage from "@/pages/mobile";
+import SetupPage from "@/pages/setup";
 import NotFound from "@/pages/not-found";
 
 const queryClient = new QueryClient({
@@ -26,8 +27,9 @@ const queryClient = new QueryClient({
 function Router() {
   return (
     <Switch>
-      {/* Mobile gateway page — full screen, no dashboard chrome */}
+      {/* Full-screen pages — no dashboard chrome */}
       <Route path="/mobile" component={MobilePage} />
+      <Route path="/setup" component={SetupPage} />
 
       {/* Dashboard routes — wrapped in sidebar layout */}
       <Route>

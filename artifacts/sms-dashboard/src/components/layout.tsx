@@ -1,4 +1,5 @@
 import { Link, useLocation } from 'wouter';
+import { useCallback } from 'react';
 import { 
   Activity, 
   Smartphone, 
@@ -9,13 +10,31 @@ import {
   Signal
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useListDevices, getListDevicesQueryKey } from '@workspace/api-client-react';
+import { useQueryClient } from '@tanstack/react-query';
+import { useWebSocket } from '@/hooks/use-websocket';
 
 export function Layout({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
+  const queryClient = useQueryClient();
+
+  const { data: devices } = useListDevices({
+    query: { queryKey: getListDevicesQueryKey(), staleTime: 10_000 }
+  });
+
+  const invalidateDevices = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: getListDevicesQueryKey() });
+  }, [queryClient]);
+  useWebSocket('device:status',     invalidateDevices);
+  useWebSocket('device:registered', invalidateDevices);
+  useWebSocket('device:removed',    invalidateDevices);
+  useWebSocket('device:offline',    invalidateDevices);
+
+  const onlineCount = devices?.filter(d => d.status === 'online').length ?? 0;
 
   const navItems = [
     { href: '/', label: 'Dashboard', icon: Activity },
-    { href: '/devices', label: 'Devices', icon: Smartphone },
+    { href: '/devices', label: 'Devices', icon: Smartphone, badge: onlineCount > 0 ? onlineCount : null },
     { href: '/contacts', label: 'Contacts', icon: Users },
     { href: '/contact-lists', label: 'Lists', icon: ListOrdered },
     { href: '/campaigns', label: 'Campaigns', icon: Megaphone },
@@ -48,7 +67,13 @@ export function Layout({ children }: { children: React.ReactNode }) {
                 )}
               >
                 <item.icon className="w-4 h-4" />
-                {item.label}
+                <span className="flex-1">{item.label}</span>
+                {'badge' in item && item.badge ? (
+                  <span className="flex items-center gap-1 bg-emerald-500/20 text-emerald-400 text-[10px] font-bold px-1.5 py-0.5 rounded-full leading-none">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    {item.badge}
+                  </span>
+                ) : null}
               </Link>
             );
           })}

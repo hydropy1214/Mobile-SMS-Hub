@@ -685,14 +685,14 @@ function ConnectDialog({ deviceId, onClose }: { deviceId: number | null, onClose
         {isLoading ? (
           <div className="py-8 flex justify-center"><Skeleton className="w-48 h-48 rounded-md" /></div>
         ) : connectInfo ? (
-          <Tabs defaultValue="termux">
+          <Tabs defaultValue="browser">
             {/* Scrollable tab list so all 6 fit */}
             <div className="overflow-x-auto pb-px">
               <TabsList className="inline-flex w-max gap-0.5 min-w-full">
+                <TabsTrigger value="browser" className="gap-1.5 text-xs px-3"><QrCode className="w-3 h-3" />Scan QR</TabsTrigger>
+                <TabsTrigger value="share"   className="gap-1.5 text-xs px-3"><Share2 className="w-3 h-3" />Share Link</TabsTrigger>
                 <TabsTrigger value="termux"  className="gap-1.5 text-xs px-3"><Zap className="w-3 h-3" />Termux</TabsTrigger>
                 <TabsTrigger value="tasker"  className="gap-1.5 text-xs px-3"><Repeat className="w-3 h-3" />Tasker</TabsTrigger>
-                <TabsTrigger value="browser" className="gap-1.5 text-xs px-3"><Globe className="w-3 h-3" />Browser</TabsTrigger>
-                <TabsTrigger value="share"   className="gap-1.5 text-xs px-3"><Share2 className="w-3 h-3" />Share Link</TabsTrigger>
                 <TabsTrigger value="python"  className="gap-1.5 text-xs px-3"><Code2 className="w-3 h-3" />Python</TabsTrigger>
                 <TabsTrigger value="api"     className="gap-1.5 text-xs px-3"><Terminal className="w-3 h-3" />API</TabsTrigger>
               </TabsList>
@@ -814,23 +814,38 @@ function ConnectDialog({ deviceId, onClose }: { deviceId: number | null, onClose
               </div>
             </TabsContent>
 
-            {/* ── Browser ────────────────────────────────────────── */}
+            {/* ── Scan QR (Setup Wizard) ─────────────────────────── */}
             <TabsContent value="browser" className="space-y-4 mt-4">
-              <div className="rounded-lg border bg-blue-500/5 border-blue-500/20 p-3 text-sm text-blue-700 dark:text-blue-400">
-                <p className="font-semibold">Works on Android &amp; iOS — no app install</p>
-                <p className="text-xs opacity-80 mt-0.5">Opens the SMS app pre-filled. You tap Send once per batch.</p>
+              <div className="rounded-lg border bg-emerald-500/5 border-emerald-500/20 p-3 text-sm text-emerald-700 dark:text-emerald-400">
+                <p className="font-semibold flex items-center gap-1.5"><Zap className="w-3.5 h-3.5" /> Fully automatic — no tapping ever</p>
+                <p className="text-xs opacity-80 mt-0.5">Scan opens a step-by-step setup wizard on the phone. Once Termux is running, SMS is sent directly via the SIM with zero interaction.</p>
               </div>
               <div className="flex flex-col items-center space-y-4">
-                <div className="bg-white p-4 rounded-xl border shadow-sm">
-                  <QRCodeSVG value={connectInfo.qrData} size={160} level="H" includeMargin={false} />
+                <div className="bg-white p-5 rounded-xl border-2 border-emerald-200 shadow-md">
+                  <QRCodeSVG value={connectInfo.qrData} size={200} level="H" includeMargin={false} />
+                </div>
+                <div className="text-center space-y-1">
+                  <p className="text-sm font-semibold">Scan with your Android phone</p>
+                  <p className="text-xs text-muted-foreground">Opens a 3-step setup guide · Takes ~2 minutes · Works headlessly</p>
+                </div>
+                <div className="w-full grid grid-cols-3 gap-2 text-xs text-center">
+                  {[
+                    { n: "1", label: "Install Termux + Termux:API" },
+                    { n: "2", label: "Install deps (one command)" },
+                    { n: "3", label: "Start daemon → auto-sends" },
+                  ].map(({ n, label }) => (
+                    <div key={n} className="bg-muted/50 rounded-lg p-2 space-y-1">
+                      <span className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-600 text-[10px] font-bold flex items-center justify-center mx-auto">{n}</span>
+                      <p className="text-muted-foreground leading-tight">{label}</p>
+                    </div>
+                  ))}
                 </div>
                 <div className="w-full space-y-1.5">
-                  <label className="text-sm font-medium">Connection URL</label>
+                  <label className="text-sm font-medium text-muted-foreground">Or open this URL on the phone:</label>
                   <div className="flex gap-2">
                     <Input readOnly value={connectInfo.connectUrl} className="font-mono text-xs bg-muted" />
                     <CopyButton text={connectInfo.connectUrl} />
                   </div>
-                  <p className="text-xs text-muted-foreground">Scan the QR code or type the URL in the phone's browser. Tap <strong>Send</strong> in your SMS app each time.</p>
                 </div>
               </div>
             </TabsContent>

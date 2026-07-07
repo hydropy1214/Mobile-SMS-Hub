@@ -11,6 +11,17 @@ router.get("/dashboard/stats", async (req, res) => {
   const devices = await db.select().from(devicesTable);
   const devicesOnline = devices.filter((d) => d.status === "online").length;
   const devicesTotal = devices.length;
+  const onlineDevices = devices
+    .filter((d) => d.status === "online")
+    .map((d) => ({
+      id: d.id,
+      name: d.name,
+      phoneNumber: d.phoneNumber,
+      batteryLevel: d.batteryLevel ?? null,
+      signalStrength: d.signalStrength ?? null,
+      simSlot: d.simSlot ?? null,
+      lastSeen: d.lastSeen?.toISOString() ?? null,
+    }));
 
   const allMessages = await db.select().from(messagesTable);
   const todayMessages = allMessages.filter((m) => m.createdAt >= startOfDay);
@@ -39,6 +50,7 @@ router.get("/dashboard/stats", async (req, res) => {
   res.json({
     devicesOnline,
     devicesTotal,
+    onlineDevices,
     messagesToday,
     successRateToday,
     activeCampaigns,

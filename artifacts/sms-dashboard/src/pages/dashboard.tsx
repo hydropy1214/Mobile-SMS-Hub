@@ -3,7 +3,9 @@ import {
   useGetDashboardStats, 
   getGetDashboardStatsQueryKey,
   useGetDashboardActivity,
-  getGetDashboardActivityQueryKey
+  getGetDashboardActivityQueryKey,
+  useListDevices,
+  getListDevicesQueryKey,
 } from "@workspace/api-client-react";
 import { useWebSocket } from "@/hooks/use-websocket";
 import { 
@@ -13,6 +15,7 @@ import {
   CardTitle 
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Badge } from "@/components/ui/badge";
 import { 
   BarChart, 
   Bar, 
@@ -26,10 +29,17 @@ import {
   Activity, 
   Smartphone, 
   Megaphone, 
-  Users, 
   CheckCircle2, 
   XCircle,
-  Clock
+  Clock,
+  Battery,
+  BatteryFull,
+  BatteryMedium,
+  Signal,
+  SignalHigh,
+  SignalMedium,
+  SignalLow,
+  WifiOff
 } from "lucide-react";
 import { format } from "date-fns";
 import { useQueryClient } from "@tanstack/react-query";
@@ -38,31 +48,34 @@ export default function Dashboard() {
   const queryClient = useQueryClient();
 
   const { data: stats, isLoading: statsLoading } = useGetDashboardStats({
-    query: {
-      queryKey: getGetDashboardStatsQueryKey()
-    }
+    query: { queryKey: getGetDashboardStatsQueryKey() }
   });
 
   const { data: activities, isLoading: activitiesLoading } = useGetDashboardActivity({
-    query: {
-      queryKey: getGetDashboardActivityQueryKey()
-    }
+    query: { queryKey: getGetDashboardActivityQueryKey() }
   });
 
-  // Real-time: refresh stats + activity on any meaningful event
-  const refreshDashboard = useCallback(() => {
+  const { data: allDevices, isLoading: devicesLoading } = useListDevices({
+    query: { queryKey: getListDevicesQueryKey() }
+  });
+
+  const onlineDevices = allDevices?.filter(d => d.status === "online") ?? [];
+
+  // Real-time: refresh on any meaningful event
+  const refreshAll = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: getGetDashboardStatsQueryKey() });
     void queryClient.invalidateQueries({ queryKey: getGetDashboardActivityQueryKey() });
+    void queryClient.invalidateQueries({ queryKey: getListDevicesQueryKey() });
   }, [queryClient]);
-  useWebSocket("campaign:progress",   refreshDashboard);
-  useWebSocket("campaign:completed",  refreshDashboard);
-  useWebSocket("campaign:started",    refreshDashboard);
-  useWebSocket("campaign:paused",     refreshDashboard);
-  useWebSocket("campaign:cancelled",  refreshDashboard);
-  useWebSocket("device:status",       refreshDashboard);
-  useWebSocket("device:registered",   refreshDashboard);
-  useWebSocket("device:removed",      refreshDashboard);
-  useWebSocket("device:offline",      refreshDashboard);
+  useWebSocket("campaign:progress",   refreshAll);
+  useWebSocket("campaign:completed",  refreshAll);
+  useWebSocket("campaign:started",    refreshAll);
+  useWebSocket("campaign:paused",     refreshAll);
+  useWebSocket("campaign:cancelled",  refreshAll);
+  useWebSocket("device:status",       refreshAll);
+  useWebSocket("device:registered",   refreshAll);
+  useWebSocket("device:removed",      refreshAll);
+  useWebSocket("device:offline",      refreshAll);
 
   return (
     <div className="space-y-6">
@@ -79,12 +92,6 @@ export default function Dashboard() {
 
       {/* Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard 
-          title="Devices Online" 
-          value={stats ? `${stats.devicesOnline} / ${stats.devicesTotal}` : null} 
-          icon={<Smartphone className="w-4 h-4 text-muted-foreground" />}
-          loading={statsLoading}
-        />
         <StatCard 
           title="Messages Today" 
           value={stats?.messagesToday} 
@@ -103,7 +110,88 @@ export default function Dashboard() {
           icon={<Megaphone className="w-4 h-4 text-muted-foreground" />}
           loading={statsLoading}
         />
+        <StatCard 
+          title="Devices Online" 
+          value={stats ? `${stats.devicesOnline} / ${stats.devicesTotal}` : null} 
+          icon={<Smartphone className="w-4 h-4 text-muted-foreground" />}
+          loading={statsLoading}
+        />
       </div>
+
+      {/* Connected Devices Panel */}
+      <Card className="rounded-md border-border/50">
+        <CardHeader className="bg-muted/30 border-b pb-4 flex flex-row items-center justify-between">
+          <CardTitle className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">
+            Connected Devices — Auto-Sending
+          </CardTitle>
+          {!devicesLoading && (
+            <Badge variant="outline" className={
+              onlineDevices.length > 0
+                ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/20 font-mono"
+                : "bg-muted text-muted-foreground font-mono"
+            }>
+              {onlineDevices.length > 0 ? (
+                <><span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse mr-1.5 inline-block" />{onlineDevices.length} of {allDevices?.length ?? 0} online</>
+              ) : `0 of ${allDevices?.length ?? 0} online`}
+            </Badge>
+          )}
+        </CardHeader>
+        <CardContent className="p-0">
+          {devicesLoading ? (
+            <div className="p-4 space-y-3">
+              {[1,2].map(i => <Skeleton key={i} className="h-14 w-full rounded-md" />)}
+            </div>
+          ) : onlineDevices.length > 0 ? (
+            <div className="divide-y">
+              {onlineDevices.map((device) => {
+                const d = device as typeof device & { simSlot?: number | null; batteryLevel?: number | null; signalStrength?: number | null; lastSeen?: string | null };
+                return (
+                  <div key={device.id} className="flex items-center gap-4 px-4 py-3 hover:bg-muted/30 transition-colors">
+                    <div className="w-9 h-9 rounded-md bg-emerald-500/10 flex items-center justify-center flex-shrink-0">
+                      <Smartphone className="w-4 h-4 text-emerald-600" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-semibold truncate">{device.name}</p>
+                      <p className="text-xs font-mono text-muted-foreground">
+                        {device.phoneNumber}
+                        {d.simSlot != null ? ` · SIM ${d.simSlot + 1}` : ""}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-4 text-xs text-muted-foreground flex-shrink-0">
+                      <span className="flex items-center gap-1.5">
+                        <DeviceBatteryIcon level={d.batteryLevel ?? null} />
+                        <span className="font-mono">{d.batteryLevel != null ? `${d.batteryLevel}%` : "—"}</span>
+                      </span>
+                      <span className="flex items-center gap-1.5">
+                        <DeviceSignalIcon level={d.signalStrength ?? null} />
+                        <span className="font-mono">{d.signalStrength != null ? `${d.signalStrength}/4` : "—"}</span>
+                      </span>
+                      {d.lastSeen && (
+                        <span className="hidden sm:flex items-center gap-1 text-muted-foreground/60">
+                          <Clock className="w-3 h-3" />
+                          {format(new Date(d.lastSeen), 'HH:mm:ss')}
+                        </span>
+                      )}
+                      <Badge variant="outline" className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20 text-xs">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse mr-1 inline-block" />
+                        Live
+                      </Badge>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="flex flex-col items-center justify-center py-10 text-muted-foreground gap-2">
+              <WifiOff className="w-8 h-8 opacity-20" />
+              <p className="text-sm font-medium">No devices online right now</p>
+              <p className="text-xs text-center max-w-xs">
+                Go to <strong>Devices</strong>, register a phone and scan the QR code to start the Termux daemon — it sends SMS automatically, no tapping needed.
+              </p>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Main Chart */}
@@ -210,6 +298,34 @@ export default function Dashboard() {
       </div>
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Types & helpers
+// ---------------------------------------------------------------------------
+
+interface OnlineDevice {
+  id: number;
+  name: string;
+  phoneNumber: string;
+  batteryLevel: number | null;
+  signalStrength: number | null;
+  simSlot: number | null;
+  lastSeen: string | null;
+}
+
+function DeviceBatteryIcon({ level }: { level: number | null }) {
+  if (level == null) return <Battery className="w-3.5 h-3.5 opacity-30" />;
+  if (level > 80) return <BatteryFull className="w-3.5 h-3.5 text-emerald-500" />;
+  if (level > 30) return <BatteryMedium className="w-3.5 h-3.5 text-primary" />;
+  return <Battery className="w-3.5 h-3.5 text-destructive" />;
+}
+
+function DeviceSignalIcon({ level }: { level: number | null }) {
+  if (level == null) return <Signal className="w-3.5 h-3.5 opacity-30" />;
+  if (level > 3) return <SignalHigh className="w-3.5 h-3.5 text-emerald-500" />;
+  if (level > 1) return <SignalMedium className="w-3.5 h-3.5 text-primary" />;
+  return <SignalLow className="w-3.5 h-3.5 text-destructive" />;
 }
 
 function StatCard({ title, value, icon, loading }: { title: string, value: React.ReactNode, icon: React.ReactNode, loading: boolean }) {
