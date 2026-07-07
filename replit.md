@@ -1,62 +1,56 @@
-# SMS Control — Bulk SMS Dashboard
+# SMS Control — Bulk SMS Campaign Manager
 
-A bulk SMS campaign management platform. Operators register Android phones as SMS gateway devices (via QR code), build contact lists, and send campaigns through those devices. Real-time progress is delivered over WebSocket.
+## Overview
+A monorepo platform that turns Android phones into SMS gateways for bulk campaigns. Operators register devices via QR code, manage contacts/lists, and run campaigns from a dashboard. The connected mobile page dispatches messages automatically.
 
-## Run & Operate
+## Architecture
+| Layer | Package | Port | Path |
+|---|---|---|---|
+| API server | `artifacts/api-server` | 8080 | `/api` |
+| Dashboard (React + Vite) | `artifacts/sms-dashboard` | 21002 | `/` |
+| DB schema (Drizzle + PostgreSQL) | `lib/db` | — | — |
+| API spec (OpenAPI + Orval codegen) | `lib/api-spec` / `lib/api-client-react` | — | — |
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 8080, mounted at `/api`)
-- `pnpm --filter @workspace/sms-dashboard run dev` — run the React dashboard (port 21002, mounted at `/`)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string (runtime-managed by Replit, do not set manually)
+## How to run
+Dependencies are managed with **pnpm workspaces**.
 
-## Stack
+```bash
+# Install all dependencies (run once after clone)
+pnpm install
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5 (port 8080, path `/api`)
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec in `lib/api-spec/openapi.yaml`)
-- Build: esbuild (CJS bundle), Vite (frontend)
-- Real-time: WebSocket at `/api/ws`
+# Push DB schema to PostgreSQL
+pnpm --filter @workspace/db run push
 
-## Where things live
+# Dev: start API server (rebuilds on each restart)
+pnpm --filter @workspace/api-server run dev
 
-- `artifacts/api-server/` — Express API server, campaign processor, device monitor, WebSocket
-- `artifacts/sms-dashboard/` — React/Vite dashboard (shadcn/ui, React Query, wouter)
-- `lib/db/` — Drizzle schema + DB client (source of truth for data model)
-- `lib/api-spec/openapi.yaml` — OpenAPI spec (source of truth for API contract)
-- `lib/api-zod/src/generated/` — Zod schemas generated from OpenAPI spec
-- `lib/api-client-react/src/generated/` — React Query hooks generated from OpenAPI spec
+# Dev: start dashboard
+pnpm --filter @workspace/sms-dashboard run dev
+```
 
-## Architecture decisions
+Replit workflows are pre-configured for both services.
 
-- Campaign processor is a background `setInterval` loop (3s tick) that processes 5 messages per campaign per tick at a 96% simulated success rate. The processor and device monitor run in the same API server process.
-- Devices register with a secret token; heartbeat calls must supply it via `Authorization: Bearer <token>`. The token is only returned at device creation and via `/devices/:id/connect` (QR setup).
-- The mobile page (`/mobile?deviceId=N&token=T`) is a self-contained heartbeat agent — no dashboard chrome, just keeps the phone online and pings every 25s.
-- API paths are all prefixed `/api` (enforced at Express app level). Frontend API calls use relative URLs starting with `/api/...`.
-- Bulk send is wrapped in a DB transaction to prevent partial message queue / campaign state mismatch on failure.
+## Environment variables
+| Variable | Required | Notes |
+|---|---|---|
+| `DATABASE_URL` | Yes | Auto-provisioned by Replit PostgreSQL |
+| `PORT` | Yes | Set per-artifact by Replit |
+| `SESSION_SECRET` | Yes | Express session signing |
+| `REPLIT_DEV_DOMAIN` | Auto | Used to build QR code URLs |
 
-## Product
+## Mobile gateway
+- Navigate to `/mobile?deviceId=<id>&token=<token>` (encoded in the QR code shown in Devices page)
+- The page connects via WebSocket + heartbeat polling
+- When a campaign starts, SMS messages are dispatched automatically — the SMS app opens pre-filled for each message
+- Screen wake lock keeps the device on
+- No button taps needed in the dashboard; user only taps **Send** in the native SMS app
 
-- **Devices**: Register and manage Android phones as SMS gateways. Scan QR → open `/mobile` page → phone stays online.
-- **Contacts**: Import contacts (CSV) or add individually. Organize into lists.
-- **Campaigns**: Create a campaign targeting a contact list + device, set an optional schedule, then send or pause/cancel. Live progress via WebSocket.
-- **Dashboard**: Mission control — devices online, messages sent today, active campaigns, 7-day message volume chart, activity feed.
+## Key files
+- `artifacts/api-server/src/lib/campaign-processor.ts` — 3s tick loop that dispatches messages to connected devices
+- `artifacts/api-server/src/lib/ws-server.ts` — WebSocket server, device registration, push dispatch
+- `artifacts/api-server/src/routes/devices.ts` — heartbeat, pending-messages polling, QR connect URL
+- `artifacts/sms-dashboard/src/pages/mobile.tsx` — auto-send gateway page
+- `lib/db/src/schema/` — Drizzle schema for all tables
 
 ## User preferences
-
-_Populate as you build — explicit user instructions worth remembering across sessions._
-
-## Gotchas
-
-- `ws` package ESM wrapper does not export `OPEN` as a named export — use `WebSocket.OPEN` instead.
-- `DATABASE_URL` is runtime-managed by Replit (`PGDATABASE`, `PGHOST`, etc. too). Do not set or request these manually.
-- After schema changes: run `pnpm --filter @workspace/db run push` then restart the API server workflow.
-- After OpenAPI spec changes: run `pnpm --filter @workspace/api-spec run codegen` to regenerate client hooks and Zod schemas.
-
-## Pointers
-
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+- Keep the project's existing monorepo structure and stack
